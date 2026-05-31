@@ -19,7 +19,7 @@
  * Plain Web Component, no build step, no external imports.
  */
 
-const CARD_VERSION = '0.4.0';
+const CARD_VERSION = '0.4.1';
 const CARD_TAG = 'integrated-ups-flow-card';
 const EDITOR_TAG = `${CARD_TAG}-editor`;
 
@@ -141,13 +141,13 @@ class IntegratedUpsFlowCard extends HTMLElement {
       ac: { entity: '', name: 'AC', icon: 'mdi:power-plug' },
       unit: {
         soc_entity: '',
-        runtime_entity: '',
-        charge_time_entity: '',
       },
       display: {
         show_state: true,
         show_throughput: true,
         show_runtime: true,
+        runtime_entity: '',
+        charge_time_entity: '',
       },
       options: {
         idle_threshold: 5,
@@ -217,8 +217,6 @@ class IntegratedUpsFlowCard extends HTMLElement {
         name: unit.name || null,
         icon: unit.icon || null,
         soc_entity: unit.soc_entity ? String(unit.soc_entity) : null,
-        runtime_entity: unit.runtime_entity ? String(unit.runtime_entity) : null,
-        charge_time_entity: unit.charge_time_entity ? String(unit.charge_time_entity) : null,
         power_entity: unit.power_entity ? String(unit.power_entity) : null,
       },
       display: {
@@ -231,6 +229,17 @@ class IntegratedUpsFlowCard extends HTMLElement {
         state_template: display.state_template || null,
         throughput_template: display.throughput_template || null,
         runtime_template: display.runtime_template || null,
+        // Runtime/charge-time sensors live alongside the show_runtime toggle.
+        // For back-compat, v0.4 configs that placed them under `unit:` are
+        // still accepted.
+        runtime_entity:
+          (display.runtime_entity && String(display.runtime_entity)) ||
+          (unit.runtime_entity && String(unit.runtime_entity)) ||
+          null,
+        charge_time_entity:
+          (display.charge_time_entity && String(display.charge_time_entity)) ||
+          (unit.charge_time_entity && String(unit.charge_time_entity)) ||
+          null,
       },
       options: {
         idle_threshold: Number.isFinite(opts.idle_threshold)
@@ -298,9 +307,9 @@ class IntegratedUpsFlowCard extends HTMLElement {
       c.dc.entity,
       c.ac.entity,
       c.unit.soc_entity,
-      c.unit.runtime_entity,
-      c.unit.charge_time_entity,
       c.unit.power_entity,
+      c.display.runtime_entity,
+      c.display.charge_time_entity,
       c.display.state_template,
       c.display.throughput_template,
       c.display.runtime_template,
@@ -580,8 +589,12 @@ class IntegratedUpsFlowCard extends HTMLElement {
     }
 
     const soc = c.unit.soc_entity ? clamp(toNum(this._getRaw(c.unit.soc_entity)), 0, 100) : null;
-    const runtimeMin = c.unit.runtime_entity ? toNum(this._getRaw(c.unit.runtime_entity)) : null;
-    const chargeMin = c.unit.charge_time_entity ? toNum(this._getRaw(c.unit.charge_time_entity)) : null;
+    const runtimeMin = c.display.runtime_entity
+      ? toNum(this._getRaw(c.display.runtime_entity))
+      : null;
+    const chargeMin = c.display.charge_time_entity
+      ? toNum(this._getRaw(c.display.charge_time_entity))
+      : null;
 
     // ---- Corner nodes ----
     this._updateCorner('pv', c.pv, pvP, opt.idle_threshold, c.pv.entity != null);
@@ -1130,6 +1143,8 @@ function buildEditorSchema(config) {
   }
   displaySchema.push({ name: 'show_runtime', selector: { boolean: {} } });
   if (d.show_runtime !== false) {
+    displaySchema.push({ name: 'runtime_entity', selector: ENTITY_SELECTOR });
+    displaySchema.push({ name: 'charge_time_entity', selector: ENTITY_SELECTOR });
     displaySchema.push({ name: 'runtime_template', selector: TEMPLATE_SELECTOR });
   }
 
@@ -1199,8 +1214,6 @@ function buildEditorSchema(config) {
       title: 'Battery (center)',
       schema: [
         { name: 'soc_entity', selector: ENTITY_SELECTOR },
-        { name: 'runtime_entity', selector: ENTITY_SELECTOR },
-        { name: 'charge_time_entity', selector: ENTITY_SELECTOR },
         { name: 'power_entity', selector: ENTITY_SELECTOR },
       ],
     },
@@ -1280,12 +1293,30 @@ class IntegratedUpsFlowCardEditor extends HTMLElement {
 
   _normalize(config) {
     const c = { ...(config || {}) };
+
     // v0.1 used `load:` for AC output. Surface it in the editor as `ac:` and
     // drop `load:` so saves write only the modern key.
     if (c.load && !c.ac) {
       c.ac = c.load;
     }
     delete c.load;
+
+    // v0.4 placed runtime/charge_time sensors under `unit:`. v0.4.1 moved them
+    // under `display:` next to the show_runtime toggle. Migrate so the form
+    // populates from existing configs and saves only the new location.
+    const unit = { ...(c.unit || {}) };
+    const display = { ...(c.display || {}) };
+    if (unit.runtime_entity && !display.runtime_entity) {
+      display.runtime_entity = unit.runtime_entity;
+    }
+    if (unit.charge_time_entity && !display.charge_time_entity) {
+      display.charge_time_entity = unit.charge_time_entity;
+    }
+    delete unit.runtime_entity;
+    delete unit.charge_time_entity;
+    c.unit = unit;
+    c.display = display;
+
     return c;
   }
 

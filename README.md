@@ -96,17 +96,17 @@ ac:                          # required — bottom-right corner
 # Battery (center)
 unit:
   soc_entity: sensor.elite_200_v2_01_battery_level                          # optional but recommended
-  runtime_entity: sensor.elite_200_v2_01_battery_time_in_minutes            # optional, used while discharging
-  charge_time_entity: sensor.elite_200_v2_01_full_charge_time_in_minutes    # optional, used while charging
   power_entity: ~                                                           # optional, advanced (see below)
 
 # Center display lines (added in v0.3) — show/hide and/or override
 display:
   show_state: true           # charging / discharging / idle label
   show_throughput: true      # ± W line below the state label
-  show_runtime: true         # Xh Ym runtime line
+  show_runtime: true         # runtime / charge-time line
   state_template: ~          # optional plain string or Jinja override
   throughput_template: ~     # optional plain string or Jinja override
+  runtime_entity: sensor.elite_200_v2_01_battery_time_in_minutes            # optional, used while discharging
+  charge_time_entity: sensor.elite_200_v2_01_full_charge_time_in_minutes    # optional, used while charging
   runtime_template: ~        # optional plain string or Jinja override
 
 options:
@@ -129,12 +129,12 @@ options:
 | `ac.entity` | **yes** | AC output watts. (`load.entity` from v0.1 still accepted as an alias.) |
 | `ac.name` / `ac.icon` | no | Defaults: `AC` / `mdi:power-plug`. |
 | `unit.soc_entity` | no | Battery SoC 0–100. Drives the arc fill and SoC text. Recommended. |
-| `unit.runtime_entity` | no | Time remaining while *discharging*, in minutes. Many integrations (BLUETTI included) report 0 while charging. Shown as `Xh Ym left`. |
-| `unit.charge_time_entity` | no | Time to full while *charging*, in minutes (e.g. BLUETTI's `full_charge_time_in_minutes`). When set and charging, the runtime line shows `Xh Ym to full`. |
 | `unit.power_entity` | no | Battery throughput in watts. Positive = charging, negative = discharging. Most integrations don't expose this — leave empty and the card derives `(grid + pv) − (ac + dc)`. |
 | `display.show_state` | no | Show the charging / discharging / idle label inside the arc. Default `true`. |
 | `display.show_throughput` | no | Show the ± W throughput line inside the arc. Default `true`. |
-| `display.show_runtime` | no | Show the runtime line inside the arc. Default `true`. |
+| `display.show_runtime` | no | Show the runtime / charge-time line inside the arc. Default `true`. |
+| `display.runtime_entity` | no | Time remaining while *discharging*, in minutes. Many integrations (BLUETTI included) report 0 while charging. Shown as `Xh Ym left`. |
+| `display.charge_time_entity` | no | Time to full while *charging*, in minutes (e.g. BLUETTI's `full_charge_time_in_minutes`). When set and charging, the runtime line shows `Xh Ym to full`. |
 | `display.state_template` | no | Override the state label. Accepts either a plain string or a Jinja template. |
 | `display.throughput_template` | no | Override the throughput line. Plain string or Jinja template. |
 | `display.runtime_template` | no | Override the runtime line. Plain string or Jinja template. |
@@ -222,10 +222,10 @@ ac:
   name: AC
   icon: mdi:power-plug
 unit:
-  name: Elite 200 V2
-  icon: mdi:power-socket-us
   soc_entity: sensor.elite_200_v2_01_battery_level
+display:
   runtime_entity: sensor.elite_200_v2_01_battery_time_in_minutes
+  charge_time_entity: sensor.elite_200_v2_01_full_charge_time_in_minutes
 options:
   idle_threshold: 5
   max_power: 2600
