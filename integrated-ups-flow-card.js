@@ -19,8 +19,9 @@
  * Plain Web Component, no build step, no external imports.
  */
 
-const CARD_VERSION = '0.2.1';
+const CARD_VERSION = '0.3.0';
 const CARD_TAG = 'integrated-ups-flow-card';
+const EDITOR_TAG = `${CARD_TAG}-editor`;
 
 console.info(
   `%c ${CARD_TAG} %c v${CARD_VERSION} `,
@@ -127,6 +128,10 @@ function buildVThenHPath(start, end, cornerR) {
 }
 
 class IntegratedUpsFlowCard extends HTMLElement {
+  static async getConfigElement() {
+    return document.createElement(EDITOR_TAG);
+  }
+
   static getStubConfig() {
     return {
       title: 'Integrated UPS',
@@ -139,6 +144,11 @@ class IntegratedUpsFlowCard extends HTMLElement {
         icon: 'mdi:power-socket-us',
         soc_entity: '',
         runtime_entity: '',
+      },
+      display: {
+        show_state: true,
+        show_throughput: true,
+        show_runtime: true,
       },
       options: {
         idle_threshold: 5,
@@ -178,6 +188,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
     if (!config.unit) throw new Error("Missing required config: 'unit'");
 
     const opts = config.options || {};
+    const display = config.display || {};
 
     this._config = {
       title: config.title ?? null,
@@ -207,6 +218,17 @@ class IntegratedUpsFlowCard extends HTMLElement {
         soc_entity: unit.soc_entity ? String(unit.soc_entity) : null,
         runtime_entity: unit.runtime_entity ? String(unit.runtime_entity) : null,
         power_entity: unit.power_entity ? String(unit.power_entity) : null,
+      },
+      display: {
+        // Visibility toggles default to true so existing configs are unaffected.
+        show_state: display.show_state !== false,
+        show_throughput: display.show_throughput !== false,
+        show_runtime: display.show_runtime !== false,
+        // Optional overrides — when set, the rendered line uses the string
+        // (templates allowed) instead of the computed default.
+        state_template: display.state_template || null,
+        throughput_template: display.throughput_template || null,
+        runtime_template: display.runtime_template || null,
       },
       options: {
         idle_threshold: Number.isFinite(opts.idle_threshold)
@@ -276,7 +298,20 @@ class IntegratedUpsFlowCard extends HTMLElement {
       c.unit.soc_entity,
       c.unit.runtime_entity,
       c.unit.power_entity,
+      c.display.state_template,
+      c.display.throughput_template,
+      c.display.runtime_template,
     ].filter((f) => f && isTemplate(f));
+  }
+
+  // Resolve a display-line override: if it's a template, return the latest
+  // rendered value; if it's a plain string, return it as-is.
+  _resolveOverride(value) {
+    if (!value) return null;
+    if (isTemplate(value)) {
+      return this._templateResults.has(value) ? this._templateResults.get(value) : '';
+    }
+    return value;
   }
 
   _setupTemplateSubs() {
@@ -577,13 +612,33 @@ class IntegratedUpsFlowCard extends HTMLElement {
     }
     this._battery.root.classList.remove('state-charge', 'state-discharge', 'state-idle');
     this._battery.root.classList.add(`state-${stateClass}`);
-    this._battery.stateEl.textContent = stateLabel;
-    this._battery.throughputEl.textContent =
+
+    // Center display lines — each can be hidden via display.show_X, and each
+    // can have its content overridden by a (template-aware) string.
+    const stateOverride = this._resolveOverride(c.display.state_template);
+    const throughputOverride = this._resolveOverride(c.display.throughput_template);
+    const runtimeOverride = this._resolveOverride(c.display.runtime_template);
+
+    const defaultThroughput =
       stateClass === 'idle'
         ? ''
         : `${stateClass === 'charge' ? '+' : '−'}${fmtPower(Math.abs(battP))}`;
-    this._battery.runtimeEl.textContent =
+    const defaultRuntime =
       c.unit.runtime_entity && runtimeMin && runtimeMin > 0 ? fmtRuntime(runtimeMin) : '';
+
+    this._setLine(this._battery.stateEl, c.display.show_state, stateOverride, stateLabel);
+    this._setLine(
+      this._battery.throughputEl,
+      c.display.show_throughput,
+      throughputOverride,
+      defaultThroughput
+    );
+    this._setLine(
+      this._battery.runtimeEl,
+      c.display.show_runtime,
+      runtimeOverride,
+      defaultRuntime
+    );
 
     // SoC level class drives the arc fill color.
     const socLevel =
@@ -633,6 +688,20 @@ class IntegratedUpsFlowCard extends HTMLElement {
   _durFromPower(p, maxP) {
     const ratio = clamp(Math.abs(p) / Math.max(1, maxP), 0, 1);
     return ANIM_SLOW_S - (ANIM_SLOW_S - ANIM_FAST_S) * ratio;
+  }
+
+  // Set the content of one center display line. Visibility honors `show`;
+  // when an override is provided (string or rendered template) it wins over
+  // the computed default.
+  _setLine(el, show, override, fallback) {
+    if (!show) {
+      el.style.display = 'none';
+      el.textContent = '';
+      return;
+    }
+    el.style.display = '';
+    const text = override !== null && override !== undefined ? String(override) : fallback;
+    el.textContent = text || '';
   }
 
   _updatePaths() {
@@ -967,3 +1036,211 @@ const STYLES = `
 `;
 
 customElements.define(CARD_TAG, IntegratedUpsFlowCard);
+
+/* =========================================================================
+ * Visual editor — exposes the YAML schema as a ha-form so the card can be
+ * added and tuned from the Lovelace UI without writing YAML.
+ *
+ * ha-form is provided by the Home Assistant frontend. We just render one,
+ * give it our schema + the current config as `data`, and forward its
+ * `value-changed` event as a `config-changed` event the Lovelace editor
+ * pipeline understands.
+ * ========================================================================= */
+
+const ENTITY_SELECTOR = { entity: { filter: { domain: 'sensor' } } };
+const ENTITY_OR_TEMPLATE_HELPER =
+  'Pick a sensor, or switch to YAML to use a Jinja template.';
+
+const EDITOR_SCHEMA = [
+  { name: 'title', selector: { text: {} } },
+
+  {
+    name: 'pv',
+    type: 'expandable',
+    title: 'PV input (top-left, optional)',
+    schema: [
+      { name: 'entity', selector: ENTITY_SELECTOR },
+      { name: 'name', selector: { text: {} } },
+      { name: 'icon', selector: { icon: {} } },
+    ],
+  },
+  {
+    name: 'grid',
+    type: 'expandable',
+    title: 'Grid input (top-right, required)',
+    schema: [
+      { name: 'entity', required: true, selector: ENTITY_SELECTOR },
+      { name: 'name', selector: { text: {} } },
+      { name: 'icon', selector: { icon: {} } },
+    ],
+  },
+  {
+    name: 'dc',
+    type: 'expandable',
+    title: 'DC output (bottom-left, optional)',
+    schema: [
+      { name: 'entity', selector: ENTITY_SELECTOR },
+      { name: 'name', selector: { text: {} } },
+      { name: 'icon', selector: { icon: {} } },
+    ],
+  },
+  {
+    name: 'ac',
+    type: 'expandable',
+    title: 'AC output (bottom-right, required)',
+    schema: [
+      { name: 'entity', required: true, selector: ENTITY_SELECTOR },
+      { name: 'name', selector: { text: {} } },
+      { name: 'icon', selector: { icon: {} } },
+    ],
+  },
+  {
+    name: 'unit',
+    type: 'expandable',
+    title: 'Unit (battery, center)',
+    schema: [
+      { name: 'name', selector: { text: {} } },
+      { name: 'icon', selector: { icon: {} } },
+      { name: 'soc_entity', selector: ENTITY_SELECTOR },
+      { name: 'runtime_entity', selector: ENTITY_SELECTOR },
+      { name: 'power_entity', selector: ENTITY_SELECTOR },
+    ],
+  },
+  {
+    name: 'display',
+    type: 'expandable',
+    title: 'Center display lines',
+    schema: [
+      { name: 'show_state', selector: { boolean: {} } },
+      { name: 'show_throughput', selector: { boolean: {} } },
+      { name: 'show_runtime', selector: { boolean: {} } },
+      { name: 'state_template', selector: { template: {} } },
+      { name: 'throughput_template', selector: { template: {} } },
+      { name: 'runtime_template', selector: { template: {} } },
+    ],
+  },
+  {
+    name: 'options',
+    type: 'expandable',
+    title: 'Options',
+    schema: [
+      {
+        name: 'idle_threshold',
+        selector: { number: { min: 0, max: 200, step: 1, mode: 'box', unit_of_measurement: 'W' } },
+      },
+      {
+        name: 'max_power',
+        selector: { number: { min: 100, max: 20000, step: 100, mode: 'box', unit_of_measurement: 'W' } },
+      },
+      { name: 'invert_battery_sign', selector: { boolean: {} } },
+    ],
+  },
+];
+
+const EDITOR_LABELS = {
+  title: 'Card title',
+  pv: 'PV input (top-left)',
+  grid: 'Grid input (top-right)',
+  dc: 'DC output (bottom-left)',
+  ac: 'AC output (bottom-right)',
+  unit: 'Unit (center)',
+  display: 'Center display lines',
+  options: 'Options',
+  entity: 'Entity',
+  name: 'Display name',
+  icon: 'Icon',
+  soc_entity: 'State-of-charge entity',
+  runtime_entity: 'Runtime entity (minutes)',
+  power_entity: 'Battery power entity (optional, ± W)',
+  show_state: 'Show charging / discharging / idle label',
+  show_throughput: 'Show battery throughput (± W)',
+  show_runtime: 'Show estimated runtime',
+  state_template: 'Override: state label (plain string or {{ template }})',
+  throughput_template: 'Override: throughput line (plain string or {{ template }})',
+  runtime_template: 'Override: runtime line (plain string or {{ template }})',
+  idle_threshold: 'Idle threshold (W)',
+  max_power: 'Max power for animation scaling (W)',
+  invert_battery_sign: 'Invert sign of battery power entity',
+};
+
+class IntegratedUpsFlowCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = null;
+    this._hass = null;
+    this._form = null;
+  }
+
+  setConfig(config) {
+    this._config = this._normalize(config);
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  connectedCallback() {
+    if (!this._form) {
+      const style = document.createElement('style');
+      style.textContent = `
+        :host { display: block; }
+        ha-form { display: block; padding: 8px 0; }
+        .hint {
+          font-size: 0.8rem;
+          color: var(--secondary-text-color, #888);
+          padding: 4px 8px 12px;
+        }
+      `;
+      this.shadowRoot.appendChild(style);
+
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent =
+        'Required: Grid input and AC output. PV / DC corners are optional and show "—" when empty. ' +
+        'Override fields in "Center display lines" accept either plain strings or Jinja templates.';
+      this.shadowRoot.appendChild(hint);
+
+      const form = document.createElement('ha-form');
+      this.shadowRoot.appendChild(form);
+      this._form = form;
+
+      form.addEventListener('value-changed', (ev) => {
+        ev.stopPropagation();
+        const newConfig = ev.detail && ev.detail.value ? ev.detail.value : {};
+        this._config = newConfig;
+        this.dispatchEvent(
+          new CustomEvent('config-changed', {
+            detail: { config: newConfig },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      });
+    }
+    this._render();
+  }
+
+  _normalize(config) {
+    const c = { ...(config || {}) };
+    // v0.1 used `load:` for AC output. Surface it in the editor as `ac:` and
+    // drop `load:` so saves write only the modern key.
+    if (c.load && !c.ac) {
+      c.ac = c.load;
+    }
+    delete c.load;
+    return c;
+  }
+
+  _render() {
+    if (!this._form) return;
+    this._form.hass = this._hass;
+    this._form.schema = EDITOR_SCHEMA;
+    this._form.data = this._config || {};
+    this._form.computeLabel = (schema) => EDITOR_LABELS[schema.name] || schema.name;
+  }
+}
+
+customElements.define(EDITOR_TAG, IntegratedUpsFlowCardEditor);

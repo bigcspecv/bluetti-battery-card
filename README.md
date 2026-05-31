@@ -58,7 +58,16 @@ below.
 
 ## Configuration
 
-### Schema (v0.2)
+### Visual editor
+
+The card ships with a Lovelace visual editor (added in **v0.3.0**). When you
+add the card via the dashboard's "Add card" picker, or edit an existing card
+and choose **Show visual editor**, you'll get an entity-picker form with
+collapsible sections for each corner, the unit, the center display, and the
+options. YAML mode still works for everything the editor exposes, plus
+anything Jinja that the editor's selectors don't render.
+
+### Schema (v0.3)
 
 ```yaml
 type: custom:integrated-ups-flow-card
@@ -92,6 +101,15 @@ unit:
   runtime_entity: sensor.elite_200_v2_01_battery_time_in_minutes      # optional
   power_entity: ~                                                     # optional override
 
+# Center display lines (added in v0.3) — show/hide and/or override
+display:
+  show_state: true           # charging / discharging / idle label
+  show_throughput: true      # ± W line below the state label
+  show_runtime: true         # Xh Ym runtime line
+  state_template: ~          # optional plain string or Jinja override
+  throughput_template: ~     # optional plain string or Jinja override
+  runtime_template: ~        # optional plain string or Jinja override
+
 options:
   idle_threshold: 5          # W deadband around zero (default 5)
   invert_battery_sign: false # flip if power_entity uses discharge-positive
@@ -115,6 +133,12 @@ options:
 | `unit.soc_entity` | no | Battery SoC 0–100. Drives the arc fill and SoC text. |
 | `unit.runtime_entity` | no | Estimated runtime remaining, in minutes. Formatted `Xh Ym`. |
 | `unit.power_entity` | no | Battery throughput in watts. Positive = charging, negative = discharging. If omitted, the card derives `(grid + pv) − (ac + dc)`. |
+| `display.show_state` | no | Show the charging / discharging / idle label inside the arc. Default `true`. |
+| `display.show_throughput` | no | Show the ± W throughput line inside the arc. Default `true`. |
+| `display.show_runtime` | no | Show the runtime line inside the arc. Default `true`. |
+| `display.state_template` | no | Override the state label. Accepts either a plain string or a Jinja template. |
+| `display.throughput_template` | no | Override the throughput line. Plain string or Jinja template. |
+| `display.runtime_template` | no | Override the runtime line. Plain string or Jinja template. |
 | `options.idle_threshold` | no | Watts deadband used for active/idle decisions. Default `5`. |
 | `options.invert_battery_sign` | no | Set `true` if your `power_entity` reports discharge as positive. |
 | `options.max_power` | no | Watts used as the upper bound for animation-speed scaling. Default `2600`. |
