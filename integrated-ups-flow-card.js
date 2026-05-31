@@ -19,7 +19,7 @@
  * Plain Web Component, no build step, no external imports.
  */
 
-const CARD_VERSION = '0.2.0';
+const CARD_VERSION = '0.2.1';
 const CARD_TAG = 'integrated-ups-flow-card';
 
 console.info(
@@ -664,15 +664,17 @@ class IntegratedUpsFlowCard extends HTMLElement {
     // Effective arc radius in screen pixels (the SVG scales the viewBox).
     const arcScreenR = (Math.min(batteryRect.width, batteryRect.height) / ARC_VB) * ARC_R;
 
-    // Anchor points on a square outside the arc. Slightly farther than the arc
-    // radius so the lines don't crash into the gauge stroke.
+    // Anchor points sit just outside the arc, vertically biased toward the
+    // corner that owns the line (inputs above center, outputs below) so each
+    // L-path's vertical run is short and the line meets its corner naturally.
     const anchorGap = 6;
     const anchorR = arcScreenR + anchorGap;
+    const yBias = arcScreenR * 0.45;
     const anchors = {
-      pv: { x: battCenter.x - anchorR, y: battCenter.y + arcScreenR * 0.45 },
-      grid: { x: battCenter.x + anchorR, y: battCenter.y + arcScreenR * 0.45 },
-      dc: { x: battCenter.x - anchorR, y: battCenter.y - arcScreenR * 0.45 },
-      ac: { x: battCenter.x + anchorR, y: battCenter.y - arcScreenR * 0.45 },
+      pv: { x: battCenter.x - anchorR, y: battCenter.y - yBias },
+      grid: { x: battCenter.x + anchorR, y: battCenter.y - yBias },
+      dc: { x: battCenter.x - anchorR, y: battCenter.y + yBias },
+      ac: { x: battCenter.x + anchorR, y: battCenter.y + yBias },
     };
 
     // Each path starts at the inner edge of the corner node (vertically
