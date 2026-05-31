@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>integrated-ups-flow-card — local test harness</title>
+  <style>
+    /*
+     * This harness simulates the Home Assistant frontend just enough to render
+     * the card without a real HA instance. It:
+     *   - Defines stub <ha-card> and <ha-icon> custom elements.
+     *   - Builds a mock `hass` object with the elite_200_v2_01 sensors at
+     *     three known scenarios (charging / discharging / idle).
+     *   - Mounts three card instances side by side.
+     */
+    :root {
+      /* A tiny subset of HA theme variables so the card has something to read. */
+      --primary-text-color: #1f1f1f;
+      --secondary-text-color: #5f6368;
+      --primary-color: #03a9f4;
+      --warning-color: #ff9800;
+      --success-color: #4caf50;
+      --divider-color: rgba(0, 0, 0, 0.18);
+      --ha-card-background: #ffffff;
+      --card-background-color: #ffffff;
+      --secondary-background-color: rgba(0, 0, 0, 0.06);
+      --ha-card-box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --primary-text-color: #e6e6e6;
+        --secondary-text-color: #a0a0a0;
+        --primary-color: #4fc3f7;
+        --warning-color: #ffb74d;
+        --success-color: #66bb6a;
+        --divider-color: rgba(255, 255, 255, 0.18);
+        --ha-card-background: #1e1e1e;
+        --card-background-color: #1e1e1e;
+        --secondary-background-color: rgba(255, 255, 255, 0.06);
+        --ha-card-box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+      }
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    .page {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 8px;
+    }
+    .sub {
+      color: var(--secondary-text-color);
+      margin-bottom: 24px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 16px;
+    }
+    .scenario h2 {
+      font-size: 1rem;
+      margin: 0 0 8px;
+      color: var(--secondary-text-color);
+      font-weight: 500;
+    }
+  </style>
+  <script src="../integrated-ups-flow-card.js"></script>
+</head>
+<body>
+  <div class="page">
+    <h1>integrated-ups-flow-card — local test harness</h1>
+    <p class="sub">
+      Renders three scenarios with mock hass data. No Home Assistant needed.
+      Open this file in a browser; you should see GRID → UNIT → LOAD with the
+      battery state inside the unit changing per scenario.
+    </p>
+    <div class="grid">
+      <div class="scenario">
+        <h2>Charging (grid 1396, load 292, SoC 80)</h2>
+        <div id="card-charging"></div>
+      </div>
+      <div class="scenario">
+        <h2>Discharging (grid 0, load 260, SoC 64)</h2>
+        <div id="card-discharging"></div>
+      </div>
+      <div class="scenario">
+        <h2>Idle (grid 300, load 295, SoC 100)</h2>
+        <div id="card-idle"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* --------- Stub ha-card and ha-icon so the card has something to render --------- */
+    class HaCardStub extends HTMLElement {
+      constructor() {
+        super();
+        const shadow = this.attachShadow({ mode: 'open' });
+        shadow.innerHTML = `
+          <style>
+            :host {
+              display: block;
+              background: var(--ha-card-background, #fff);
+              border-radius: var(--ha-card-border-radius, 12px);
+              box-shadow: var(--ha-card-box-shadow, 0 1px 3px rgba(0, 0, 0, 0.08));
+              color: var(--primary-text-color, #212121);
+              border: 1px solid var(--divider-color, rgba(0,0,0,0.1));
+              overflow: hidden;
+            }
+            ::slotted(*) { box-sizing: border-box; }
+          </style>
+          <slot></slot>
+        `;
+      }
+    }
+    customElements.define('ha-card', HaCardStub);
+
+    /* Render the icon name as a small inline label since we don't have mdi available. */
+    class HaIconStub extends HTMLElement {
+      static get observedAttributes() { return ['icon']; }
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' });
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host {
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              width: var(--mdc-icon-size, 24px);
+              height: var(--mdc-icon-size, 24px);
+              color: inherit;
+            }
+            svg { width: 100%; height: 100%; fill: currentColor; }
+          </style>
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.5"/><text x="12" y="15" text-anchor="middle" font-size="6" fill="currentColor">${this.getAttribute('icon') || ''}</text></svg>
+        `;
+      }
+      attributeChangedCallback(name) {
+        if (name === 'icon') {
+          const text = this.shadowRoot && this.shadowRoot.querySelector('text');
+          if (text) text.textContent = this.getAttribute('icon') || '';
+        }
+      }
+    }
+    customElements.define('ha-icon', HaIconStub);
+
+    /* --------- Mock hass factory --------- */
+    function makeHass({ grid, load, soc, runtime }) {
+      return {
+        states: {
+          'sensor.elite_200_v2_01_grid_input_power': {
+            entity_id: 'sensor.elite_200_v2_01_grid_input_power',
+            state: String(grid),
+            attributes: { unit_of_measurement: 'W', friendly_name: 'Grid Input Power' },
+          },
+          'sensor.elite_200_v2_01_alternating_current_out_power': {
+            entity_id: 'sensor.elite_200_v2_01_alternating_current_out_power',
+            state: String(load),
+            attributes: { unit_of_measurement: 'W', friendly_name: 'AC Out Power' },
+          },
+          'sensor.elite_200_v2_01_battery_level': {
+            entity_id: 'sensor.elite_200_v2_01_battery_level',
+            state: String(soc),
+            attributes: { unit_of_measurement: '%', friendly_name: 'Battery Level' },
+          },
+          'sensor.elite_200_v2_01_battery_time_in_minutes': {
+            entity_id: 'sensor.elite_200_v2_01_battery_time_in_minutes',
+            state: String(runtime),
+            attributes: { unit_of_measurement: 'min', friendly_name: 'Battery Runtime' },
+          },
+        },
+        connection: {
+          // The card only subscribes if entity fields look like templates.
+          // For these scenarios we use entity IDs, so this should not be hit.
+          subscribeMessage: () => Promise.resolve(() => {}),
+        },
+      };
+    }
+
+    /* --------- Config used for all three cards --------- */
+    const baseConfig = {
+      type: 'custom:integrated-ups-flow-card',
+      title: 'Elite 200 V2',
+      grid: {
+        entity: 'sensor.elite_200_v2_01_grid_input_power',
+        name: 'Grid',
+        icon: 'mdi:transmission-tower',
+      },
+      load: {
+        entity: 'sensor.elite_200_v2_01_alternating_current_out_power',
+        name: 'Load',
+        icon: 'mdi:home',
+      },
+      unit: {
+        name: 'Elite 200 V2',
+        icon: 'mdi:power-socket-us',
+        soc_entity: 'sensor.elite_200_v2_01_battery_level',
+        runtime_entity: 'sensor.elite_200_v2_01_battery_time_in_minutes',
+      },
+      options: { idle_threshold: 5, invert_battery_sign: false, max_power: 2600 },
+    };
+
+    /* --------- Mount cards once the module is loaded --------- */
+    function mountAll() {
+      const scenarios = [
+        // charging: grid 1396, load 292 -> battery_power = +1104 -> charging
+        { id: 'card-charging',    state: { grid: 1396, load: 292, soc: 80,  runtime: 0 } },
+        // discharging: grid 0, load 260 -> battery_power = -260 -> discharging
+        { id: 'card-discharging', state: { grid: 0,    load: 260, soc: 64,  runtime: 184 } },
+        // idle: grid 300, load 295 -> battery_power = +5 within idle threshold
+        { id: 'card-idle',        state: { grid: 300,  load: 295, soc: 100, runtime: 0 } },
+      ];
+      for (const s of scenarios) {
+        const host = document.getElementById(s.id);
+        const card = document.createElement('integrated-ups-flow-card');
+        card.setConfig({ ...baseConfig });
+        card.hass = makeHass(s.state);
+        host.appendChild(card);
+      }
+    }
+
+    if (customElements.get('integrated-ups-flow-card')) {
+      mountAll();
+    } else {
+      customElements.whenDefined('integrated-ups-flow-card').then(mountAll);
+    }
+  </script>
+</body>
+</html>
