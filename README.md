@@ -67,7 +67,7 @@ collapsible sections for each corner, the unit, the center display, and the
 options. YAML mode still works for everything the editor exposes, plus
 anything Jinja that the editor's selectors don't render.
 
-### Schema (v0.3)
+### Schema (v0.4)
 
 ```yaml
 type: custom:integrated-ups-flow-card
@@ -95,11 +95,10 @@ ac:                          # required — bottom-right corner
 
 # Battery (center)
 unit:
-  name: Elite 200 V2
-  icon: mdi:power-socket-us
-  soc_entity: sensor.elite_200_v2_01_battery_level                    # optional but recommended
-  runtime_entity: sensor.elite_200_v2_01_battery_time_in_minutes      # optional
-  power_entity: ~                                                     # optional override
+  soc_entity: sensor.elite_200_v2_01_battery_level                          # optional but recommended
+  runtime_entity: sensor.elite_200_v2_01_battery_time_in_minutes            # optional, used while discharging
+  charge_time_entity: sensor.elite_200_v2_01_full_charge_time_in_minutes    # optional, used while charging
+  power_entity: ~                                                           # optional, advanced (see below)
 
 # Center display lines (added in v0.3) — show/hide and/or override
 display:
@@ -129,10 +128,10 @@ options:
 | `dc.name` / `dc.icon` | no | Defaults: `DC` / `mdi:current-dc`. |
 | `ac.entity` | **yes** | AC output watts. (`load.entity` from v0.1 still accepted as an alias.) |
 | `ac.name` / `ac.icon` | no | Defaults: `AC` / `mdi:power-plug`. |
-| `unit.name` / `unit.icon` | no | Center battery node display. |
-| `unit.soc_entity` | no | Battery SoC 0–100. Drives the arc fill and SoC text. |
-| `unit.runtime_entity` | no | Estimated runtime remaining, in minutes. Formatted `Xh Ym`. |
-| `unit.power_entity` | no | Battery throughput in watts. Positive = charging, negative = discharging. If omitted, the card derives `(grid + pv) − (ac + dc)`. |
+| `unit.soc_entity` | no | Battery SoC 0–100. Drives the arc fill and SoC text. Recommended. |
+| `unit.runtime_entity` | no | Time remaining while *discharging*, in minutes. Many integrations (BLUETTI included) report 0 while charging. Shown as `Xh Ym left`. |
+| `unit.charge_time_entity` | no | Time to full while *charging*, in minutes (e.g. BLUETTI's `full_charge_time_in_minutes`). When set and charging, the runtime line shows `Xh Ym to full`. |
+| `unit.power_entity` | no | Battery throughput in watts. Positive = charging, negative = discharging. Most integrations don't expose this — leave empty and the card derives `(grid + pv) − (ac + dc)`. |
 | `display.show_state` | no | Show the charging / discharging / idle label inside the arc. Default `true`. |
 | `display.show_throughput` | no | Show the ± W throughput line inside the arc. Default `true`. |
 | `display.show_runtime` | no | Show the runtime line inside the arc. Default `true`. |

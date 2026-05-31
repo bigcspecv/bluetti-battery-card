@@ -19,7 +19,7 @@
  * Plain Web Component, no build step, no external imports.
  */
 
-const CARD_VERSION = '0.3.0';
+const CARD_VERSION = '0.4.0';
 const CARD_TAG = 'integrated-ups-flow-card';
 const EDITOR_TAG = `${CARD_TAG}-editor`;
 
@@ -140,10 +140,9 @@ class IntegratedUpsFlowCard extends HTMLElement {
       dc: { entity: '', name: 'DC', icon: 'mdi:current-dc' },
       ac: { entity: '', name: 'AC', icon: 'mdi:power-plug' },
       unit: {
-        name: 'UPS',
-        icon: 'mdi:power-socket-us',
         soc_entity: '',
         runtime_entity: '',
+        charge_time_entity: '',
       },
       display: {
         show_state: true,
@@ -213,10 +212,13 @@ class IntegratedUpsFlowCard extends HTMLElement {
         icon: ac.icon || 'mdi:power-plug',
       },
       unit: {
-        name: unit.name || 'UPS',
-        icon: unit.icon || 'mdi:power-socket-us',
+        // name / icon are silently preserved for back-compat with v0.2/v0.3
+        // configs but no longer rendered anywhere.
+        name: unit.name || null,
+        icon: unit.icon || null,
         soc_entity: unit.soc_entity ? String(unit.soc_entity) : null,
         runtime_entity: unit.runtime_entity ? String(unit.runtime_entity) : null,
+        charge_time_entity: unit.charge_time_entity ? String(unit.charge_time_entity) : null,
         power_entity: unit.power_entity ? String(unit.power_entity) : null,
       },
       display: {
@@ -297,6 +299,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
       c.ac.entity,
       c.unit.soc_entity,
       c.unit.runtime_entity,
+      c.unit.charge_time_entity,
       c.unit.power_entity,
       c.display.state_template,
       c.display.throughput_template,
@@ -578,6 +581,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
 
     const soc = c.unit.soc_entity ? clamp(toNum(this._getRaw(c.unit.soc_entity)), 0, 100) : null;
     const runtimeMin = c.unit.runtime_entity ? toNum(this._getRaw(c.unit.runtime_entity)) : null;
+    const chargeMin = c.unit.charge_time_entity ? toNum(this._getRaw(c.unit.charge_time_entity)) : null;
 
     // ---- Corner nodes ----
     this._updateCorner('pv', c.pv, pvP, opt.idle_threshold, c.pv.entity != null);
@@ -623,8 +627,12 @@ class IntegratedUpsFlowCard extends HTMLElement {
       stateClass === 'idle'
         ? ''
         : `${stateClass === 'charge' ? '+' : '−'}${fmtPower(Math.abs(battP))}`;
-    const defaultRuntime =
-      c.unit.runtime_entity && runtimeMin && runtimeMin > 0 ? fmtRuntime(runtimeMin) : '';
+    let defaultRuntime = '';
+    if (stateClass === 'charge' && chargeMin && chargeMin > 0) {
+      defaultRuntime = `${fmtRuntime(chargeMin)} to full`;
+    } else if (stateClass === 'discharge' && runtimeMin && runtimeMin > 0) {
+      defaultRuntime = `${fmtRuntime(runtimeMin)} left`;
+    }
 
     this._setLine(this._battery.stateEl, c.display.show_state, stateOverride, stateLabel);
     this._setLine(
@@ -1048,120 +1056,168 @@ customElements.define(CARD_TAG, IntegratedUpsFlowCard);
  * ========================================================================= */
 
 const ENTITY_SELECTOR = { entity: { filter: { domain: 'sensor' } } };
-const ENTITY_OR_TEMPLATE_HELPER =
-  'Pick a sensor, or switch to YAML to use a Jinja template.';
+const TEMPLATE_SELECTOR = { template: {} };
 
-const EDITOR_SCHEMA = [
-  { name: 'title', selector: { text: {} } },
-
-  {
-    name: 'pv',
-    type: 'expandable',
-    title: 'PV input (top-left, optional)',
-    schema: [
-      { name: 'entity', selector: ENTITY_SELECTOR },
-      { name: 'name', selector: { text: {} } },
-      { name: 'icon', selector: { icon: {} } },
-    ],
-  },
-  {
-    name: 'grid',
-    type: 'expandable',
-    title: 'Grid input (top-right, required)',
-    schema: [
-      { name: 'entity', required: true, selector: ENTITY_SELECTOR },
-      { name: 'name', selector: { text: {} } },
-      { name: 'icon', selector: { icon: {} } },
-    ],
-  },
-  {
-    name: 'dc',
-    type: 'expandable',
-    title: 'DC output (bottom-left, optional)',
-    schema: [
-      { name: 'entity', selector: ENTITY_SELECTOR },
-      { name: 'name', selector: { text: {} } },
-      { name: 'icon', selector: { icon: {} } },
-    ],
-  },
-  {
-    name: 'ac',
-    type: 'expandable',
-    title: 'AC output (bottom-right, required)',
-    schema: [
-      { name: 'entity', required: true, selector: ENTITY_SELECTOR },
-      { name: 'name', selector: { text: {} } },
-      { name: 'icon', selector: { icon: {} } },
-    ],
-  },
-  {
-    name: 'unit',
-    type: 'expandable',
-    title: 'Unit (battery, center)',
-    schema: [
-      { name: 'name', selector: { text: {} } },
-      { name: 'icon', selector: { icon: {} } },
-      { name: 'soc_entity', selector: ENTITY_SELECTOR },
-      { name: 'runtime_entity', selector: ENTITY_SELECTOR },
-      { name: 'power_entity', selector: ENTITY_SELECTOR },
-    ],
-  },
-  {
-    name: 'display',
-    type: 'expandable',
-    title: 'Center display lines',
-    schema: [
-      { name: 'show_state', selector: { boolean: {} } },
-      { name: 'show_throughput', selector: { boolean: {} } },
-      { name: 'show_runtime', selector: { boolean: {} } },
-      { name: 'state_template', selector: { template: {} } },
-      { name: 'throughput_template', selector: { template: {} } },
-      { name: 'runtime_template', selector: { template: {} } },
-    ],
-  },
-  {
-    name: 'options',
-    type: 'expandable',
-    title: 'Options',
-    schema: [
-      {
-        name: 'idle_threshold',
-        selector: { number: { min: 0, max: 200, step: 1, mode: 'box', unit_of_measurement: 'W' } },
-      },
-      {
-        name: 'max_power',
-        selector: { number: { min: 100, max: 20000, step: 100, mode: 'box', unit_of_measurement: 'W' } },
-      },
-      { name: 'invert_battery_sign', selector: { boolean: {} } },
-    ],
-  },
-];
-
+// Top-level field labels (shown on the form input)
 const EDITOR_LABELS = {
   title: 'Card title',
   pv: 'PV input (top-left)',
   grid: 'Grid input (top-right)',
   dc: 'DC output (bottom-left)',
   ac: 'AC output (bottom-right)',
-  unit: 'Unit (center)',
+  unit: 'Battery (center)',
   display: 'Center display lines',
   options: 'Options',
   entity: 'Entity',
   name: 'Display name',
   icon: 'Icon',
-  soc_entity: 'State-of-charge entity',
-  runtime_entity: 'Runtime entity (minutes)',
-  power_entity: 'Battery power entity (optional, ± W)',
+  soc_entity: 'Battery level (state of charge)',
+  runtime_entity: 'Runtime remaining sensor (minutes, while discharging)',
+  charge_time_entity: 'Time-to-full sensor (minutes, while charging)',
+  power_entity: 'Battery power sensor (± W, optional)',
   show_state: 'Show charging / discharging / idle label',
   show_throughput: 'Show battery throughput (± W)',
   show_runtime: 'Show estimated runtime',
-  state_template: 'Override: state label (plain string or {{ template }})',
-  throughput_template: 'Override: throughput line (plain string or {{ template }})',
-  runtime_template: 'Override: runtime line (plain string or {{ template }})',
+  state_template: 'Override the state label',
+  throughput_template: 'Override the throughput line',
+  runtime_template: 'Override the runtime line',
   idle_threshold: 'Idle threshold (W)',
   max_power: 'Max power for animation scaling (W)',
-  invert_battery_sign: 'Invert sign of battery power entity',
+  invert_battery_sign: 'Invert sign of battery power sensor',
 };
+
+// Per-field helper text rendered under the input.
+const EDITOR_HELPERS = {
+  title: 'Optional header shown at the top of the card.',
+  entity: 'A sensor reading watts. Switch to YAML if you need a Jinja template here.',
+  soc_entity: 'Optional, but recommended. Without it the SoC arc and percentage are blank.',
+  runtime_entity:
+    "Reports time remaining while discharging (e.g. BLUETTI's battery_time_in_minutes). Reads 0 when not discharging.",
+  charge_time_entity:
+    "Reports time to full while charging (e.g. BLUETTI's full_charge_time_in_minutes). When set, the runtime line shows 'Xh Ym to full' during charging and 'Xh Ym left' during discharging.",
+  power_entity:
+    'Advanced. Most integrations do not expose this directly — leave empty and the card will derive battery throughput as (PV + Grid) − (AC + DC). Set only if your integration provides a single ± W battery sensor.',
+  state_template:
+    'Plain string or Jinja template. Empty = use the default (charging / discharging / idle).',
+  throughput_template:
+    'Plain string or Jinja template. Empty = use the default (+1.10 kW / −0.35 kW).',
+  runtime_template:
+    'Plain string or Jinja template. Empty = use the default runtime line (charge-time or runtime, see above).',
+  idle_threshold:
+    'Power values below this are treated as no flow (line stays gray). Default 5 W.',
+  max_power:
+    'Wattage that maps to the fastest dot animation. Higher wattages clamp to this; lower wattages slow proportionally. Default 2600 W.',
+  invert_battery_sign:
+    "Only relevant when 'Battery power sensor' above is set. Toggle on if that sensor reports discharge as positive (some integrations).",
+};
+
+// Build the form schema dynamically so override fields only appear when their
+// corresponding toggle is on, and `invert_battery_sign` is only offered when
+// a `power_entity` is configured.
+function buildEditorSchema(config) {
+  const c = config || {};
+  const u = c.unit || {};
+  const d = c.display || {};
+
+  const displaySchema = [];
+  displaySchema.push({ name: 'show_state', selector: { boolean: {} } });
+  if (d.show_state !== false) {
+    displaySchema.push({ name: 'state_template', selector: TEMPLATE_SELECTOR });
+  }
+  displaySchema.push({ name: 'show_throughput', selector: { boolean: {} } });
+  if (d.show_throughput !== false) {
+    displaySchema.push({ name: 'throughput_template', selector: TEMPLATE_SELECTOR });
+  }
+  displaySchema.push({ name: 'show_runtime', selector: { boolean: {} } });
+  if (d.show_runtime !== false) {
+    displaySchema.push({ name: 'runtime_template', selector: TEMPLATE_SELECTOR });
+  }
+
+  const optionsSchema = [
+    {
+      name: 'idle_threshold',
+      selector: {
+        number: { min: 0, max: 200, step: 1, mode: 'box', unit_of_measurement: 'W' },
+      },
+    },
+    {
+      name: 'max_power',
+      selector: {
+        number: { min: 100, max: 20000, step: 100, mode: 'box', unit_of_measurement: 'W' },
+      },
+    },
+  ];
+  if (u.power_entity) {
+    optionsSchema.push({ name: 'invert_battery_sign', selector: { boolean: {} } });
+  }
+
+  return [
+    { name: 'title', selector: { text: {} } },
+    {
+      name: 'pv',
+      type: 'expandable',
+      title: 'PV input (top-left, optional)',
+      schema: [
+        { name: 'entity', selector: ENTITY_SELECTOR },
+        { name: 'name', selector: { text: {} } },
+        { name: 'icon', selector: { icon: {} } },
+      ],
+    },
+    {
+      name: 'grid',
+      type: 'expandable',
+      title: 'Grid input (top-right, required)',
+      schema: [
+        { name: 'entity', required: true, selector: ENTITY_SELECTOR },
+        { name: 'name', selector: { text: {} } },
+        { name: 'icon', selector: { icon: {} } },
+      ],
+    },
+    {
+      name: 'dc',
+      type: 'expandable',
+      title: 'DC output (bottom-left, optional)',
+      schema: [
+        { name: 'entity', selector: ENTITY_SELECTOR },
+        { name: 'name', selector: { text: {} } },
+        { name: 'icon', selector: { icon: {} } },
+      ],
+    },
+    {
+      name: 'ac',
+      type: 'expandable',
+      title: 'AC output (bottom-right, required)',
+      schema: [
+        { name: 'entity', required: true, selector: ENTITY_SELECTOR },
+        { name: 'name', selector: { text: {} } },
+        { name: 'icon', selector: { icon: {} } },
+      ],
+    },
+    {
+      name: 'unit',
+      type: 'expandable',
+      title: 'Battery (center)',
+      schema: [
+        { name: 'soc_entity', selector: ENTITY_SELECTOR },
+        { name: 'runtime_entity', selector: ENTITY_SELECTOR },
+        { name: 'charge_time_entity', selector: ENTITY_SELECTOR },
+        { name: 'power_entity', selector: ENTITY_SELECTOR },
+      ],
+    },
+    {
+      name: 'display',
+      type: 'expandable',
+      title: 'Center display lines',
+      schema: displaySchema,
+    },
+    {
+      name: 'options',
+      type: 'expandable',
+      title: 'Options',
+      schema: optionsSchema,
+    },
+  ];
+}
 
 class IntegratedUpsFlowCardEditor extends HTMLElement {
   constructor() {
@@ -1199,8 +1255,7 @@ class IntegratedUpsFlowCardEditor extends HTMLElement {
       const hint = document.createElement('div');
       hint.className = 'hint';
       hint.textContent =
-        'Required: Grid input and AC output. PV / DC corners are optional and show "—" when empty. ' +
-        'Override fields in "Center display lines" accept either plain strings or Jinja templates.';
+        'Required: Grid and AC. PV and DC are optional — their corners show "—" when empty.';
       this.shadowRoot.appendChild(hint);
 
       const form = document.createElement('ha-form');
@@ -1237,9 +1292,10 @@ class IntegratedUpsFlowCardEditor extends HTMLElement {
   _render() {
     if (!this._form) return;
     this._form.hass = this._hass;
-    this._form.schema = EDITOR_SCHEMA;
+    this._form.schema = buildEditorSchema(this._config || {});
     this._form.data = this._config || {};
     this._form.computeLabel = (schema) => EDITOR_LABELS[schema.name] || schema.name;
+    this._form.computeHelper = (schema) => EDITOR_HELPERS[schema.name] || undefined;
   }
 }
 
