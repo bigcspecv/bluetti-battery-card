@@ -78,7 +78,7 @@ pv:                          # optional — top-left corner
   entity: sensor.elite_200_v2_01_photovoltaics_input_power
   name: PV
   icon: mdi:solar-panel
-grid:                        # required — top-right corner
+grid:                        # optional — top-right corner
   entity: sensor.elite_200_v2_01_grid_input_power
   name: Grid
   icon: mdi:transmission-tower
@@ -88,7 +88,7 @@ dc:                          # optional — bottom-left corner
   entity: sensor.elite_200_v2_01_direct_current_out_power
   name: DC
   icon: mdi:current-dc
-ac:                          # required — bottom-right corner
+ac:                          # optional — bottom-right corner
   entity: sensor.elite_200_v2_01_alternating_current_out_power
   name: AC
   icon: mdi:power-plug
@@ -122,11 +122,11 @@ options:
 | `title` | no | Header text. Omit to hide. |
 | `pv.entity` | no | Solar input watts. Import-only — clamped to ≥ 0. Corner shows "—" when omitted. |
 | `pv.name` / `pv.icon` | no | Display name / MDI icon. Defaults: `PV` / `mdi:solar-panel`. |
-| `grid.entity` | **yes** | Grid input watts. Import-only — clamped to ≥ 0. |
+| `grid.entity` | no | Grid input watts. Import-only — clamped to ≥ 0. Omit to hide the Grid corner and its flow line. |
 | `grid.name` / `grid.icon` | no | Defaults: `Grid` / `mdi:transmission-tower`. |
 | `dc.entity` | no | DC output watts. Corner shows "—" when omitted. |
 | `dc.name` / `dc.icon` | no | Defaults: `DC` / `mdi:current-dc`. |
-| `ac.entity` | **yes** | AC output watts. (`load.entity` from v0.1 still accepted as an alias.) |
+| `ac.entity` | no | AC output watts. (`load.entity` from v0.1 still accepted as an alias.) Omit to hide the AC corner and its flow line. |
 | `ac.name` / `ac.icon` | no | Defaults: `AC` / `mdi:power-plug`. |
 | `unit.soc_entity` | no | Battery SoC 0–100. Drives the arc fill and SoC text. Recommended. |
 | `unit.power_entity` | no | Battery throughput in watts. Positive = charging, negative = discharging. Most integrations don't expose this — leave empty and the card derives `(grid + pv) − (ac + dc)`. |
@@ -165,6 +165,14 @@ pv:
     {{ (states('sensor.pv_string_1') | float(0)
         + states('sensor.pv_string_2') | float(0)) | round(0) }}
 ```
+
+## Interactivity
+
+Each of the four corners (PV, Grid, DC, AC) and the central battery is
+clickable and opens Home Assistant's standard more-info dialog for the
+configured entity — `pv.entity`, `grid.entity`, `dc.entity`, `ac.entity`, and
+`unit.soc_entity` respectively. Corners whose entity is configured as a Jinja
+template are non-clickable (a template doesn't map to a single entity).
 
 ## Flow logic
 

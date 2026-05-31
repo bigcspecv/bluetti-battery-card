@@ -19,7 +19,7 @@
  * Plain Web Component, no build step, no external imports.
  */
 
-const CARD_VERSION = '0.4.1';
+const CARD_VERSION = '0.4.2';
 const CARD_TAG = 'integrated-ups-flow-card';
 const EDITOR_TAG = `${CARD_TAG}-editor`;
 
@@ -182,10 +182,8 @@ class IntegratedUpsFlowCard extends HTMLElement {
     const dc = config.dc || {};
     const unit = config.unit || {};
 
-    if (!grid.entity) throw new Error("Missing required config: 'grid.entity'");
-    if (!ac.entity) throw new Error("Missing required config: 'ac.entity' (or 'load.entity')");
-    if (!config.unit) throw new Error("Missing required config: 'unit'");
-
+    // No fields are required. Any/all of pv, grid, dc, ac can be omitted —
+    // their corners (and flow lines) just don't render when absent.
     const opts = config.options || {};
     const display = config.display || {};
 
@@ -197,7 +195,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
         icon: pv.icon || 'mdi:solar-panel',
       },
       grid: {
-        entity: String(grid.entity),
+        entity: grid.entity ? String(grid.entity) : null,
         name: grid.name || 'Grid',
         icon: grid.icon || 'mdi:transmission-tower',
       },
@@ -207,7 +205,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
         icon: dc.icon || 'mdi:current-dc',
       },
       ac: {
-        entity: String(ac.entity),
+        entity: ac.entity ? String(ac.entity) : null,
         name: ac.name || 'AC',
         icon: ac.icon || 'mdi:power-plug',
       },
@@ -471,12 +469,40 @@ class IntegratedUpsFlowCard extends HTMLElement {
       root.appendChild(meta);
       root.appendChild(iconWrap);
     }
+
+    root.addEventListener('click', (e) => this._handleCornerClick(key, e));
+
     return { root, icon, name, power, iconWrap };
+  }
+
+  // Fire `hass-more-info` so the lovelace shell opens its standard dialog.
+  _fireMoreInfo(entityId) {
+    if (!entityId) return;
+    const evt = new Event('hass-more-info', { bubbles: true, composed: true });
+    evt.detail = { entityId };
+    this.dispatchEvent(evt);
+  }
+
+  _handleCornerClick(key, event) {
+    if (!this._config) return;
+    const cfg = this._config[key];
+    if (!cfg || !cfg.entity || isTemplate(cfg.entity)) return;
+    event.stopPropagation();
+    this._fireMoreInfo(cfg.entity);
+  }
+
+  _handleBatteryClick(event) {
+    if (!this._config) return;
+    const id = this._config.unit && this._config.unit.soc_entity;
+    if (!id || isTemplate(id)) return;
+    event.stopPropagation();
+    this._fireMoreInfo(id);
   }
 
   _createBatteryCenter() {
     const root = document.createElement('div');
     root.className = 'battery-center';
+    root.addEventListener('click', (e) => this._handleBatteryClick(e));
 
     // The SoC arc is rendered as its own inline SVG (separate from the
     // outer connection-paths SVG) so it can scale neatly via CSS.
@@ -597,12 +623,14 @@ class IntegratedUpsFlowCard extends HTMLElement {
       : null;
 
     // ---- Corner nodes ----
-    this._updateCorner('pv', c.pv, pvP, opt.idle_threshold, c.pv.entity != null);
-    this._updateCorner('grid', c.grid, gridP, opt.idle_threshold, true);
-    this._updateCorner('dc', c.dc, dcP, opt.idle_threshold, c.dc.entity != null);
-    this._updateCorner('ac', c.ac, acP, opt.idle_threshold, true);
+    this._updateCorner('pv', c.pv, pvP, opt.idle_threshold, !!c.pv.entity);
+    this._updateCorner('grid', c.grid, gridP, opt.idle_threshold, !!c.grid.entity);
+    this._updateCorner('dc', c.dc, dcP, opt.idle_threshold, !!c.dc.entity);
+    this._updateCorner('ac', c.ac, acP, opt.idle_threshold, !!c.ac.entity);
 
     // ---- Battery center ----
+    const batteryClickable = !!c.unit.soc_entity && !isTemplate(c.unit.soc_entity);
+    this._battery.root.classList.toggle('is-clickable', batteryClickable);
     this._battery.icon.setAttribute('icon', this._batteryIconForState(soc, battP, opt.idle_threshold));
     if (soc === null) {
       this._battery.socText.nodeValue = '—';
@@ -689,12 +717,23 @@ class IntegratedUpsFlowCard extends HTMLElement {
 
   _updateCorner(key, cfg, power, idle, present) {
     const node = this._cornerNodes[key];
+    // When the entity isn't configured, hide the entire corner — and skip the
+    // flow path (set in _updatePaths) — so the layout shows nothing at all.
+    if (!present) {
+      node.root.style.display = 'none';
+      node.root.classList.remove('is-active', 'is-clickable');
+      return;
+    }
+    node.root.style.display = '';
     node.icon.setAttribute('icon', cfg.icon);
     node.name.textContent = cfg.name;
-    node.power.textContent = present ? fmtPower(power) : '—';
-    const active = present && power > idle;
+    node.power.textContent = fmtPower(power);
+    const active = power > idle;
     node.root.classList.toggle('is-active', active);
-    node.root.classList.toggle('is-absent', !present);
+    // Clickable only when the entity is a plain entity_id (templates have no
+    // single entity to open a more-info dialog for).
+    const clickable = !!cfg.entity && !isTemplate(cfg.entity);
+    node.root.classList.toggle('is-clickable', clickable);
   }
 
   _setFlowState(key, active, power, maxPower) {
@@ -768,19 +807,26 @@ class IntegratedUpsFlowCard extends HTMLElement {
     };
 
     // Each path starts at the inner edge of the corner node (vertically
-    // toward the middle row) and ends at the matching anchor.
+    // toward the middle row) and ends at the matching anchor. Skip absent
+    // corners — their flow lines should be invisible.
     const cornerRadius = 18;
-    const starts = {};
     for (const key of ['pv', 'grid', 'dc', 'ac']) {
+      const cfg = this._config[key];
+      const present = !!(cfg && cfg.entity);
+      const p = this._flowPaths[key];
+      if (!present) {
+        p.base.style.display = 'none';
+        p.overlay.style.display = 'none';
+        continue;
+      }
+      p.base.style.display = '';
+      p.overlay.style.display = '';
       const r = cornerRect(key);
       const onTop = key === 'pv' || key === 'grid';
-      starts[key] = { x: r.x, y: r.y + (onTop ? r.h / 2 : -r.h / 2) };
-    }
-
-    for (const key of ['pv', 'grid', 'dc', 'ac']) {
-      const d = buildVThenHPath(starts[key], anchors[key], cornerRadius);
-      this._flowPaths[key].base.setAttribute('d', d);
-      this._flowPaths[key].overlay.setAttribute('d', d);
+      const start = { x: r.x, y: r.y + (onTop ? r.h / 2 : -r.h / 2) };
+      const d = buildVThenHPath(start, anchors[key], cornerRadius);
+      p.base.setAttribute('d', d);
+      p.overlay.setAttribute('d', d);
     }
   }
 
@@ -899,6 +945,10 @@ const STYLES = `
   min-width: 0;
   max-width: 100%;
 }
+.corner.is-clickable { cursor: pointer; }
+.corner.is-clickable:hover .corner__icon-wrap {
+  box-shadow: 0 0 0 2px var(--divider-color, rgba(127, 127, 127, 0.4));
+}
 .corner__icon-wrap {
   width: 44px;
   height: 44px;
@@ -955,6 +1005,7 @@ const STYLES = `
   align-items: center;
   justify-content: center;
 }
+.battery-center.is-clickable { cursor: pointer; }
 .soc-svg {
   position: absolute;
   inset: 0;
@@ -1171,7 +1222,7 @@ function buildEditorSchema(config) {
     {
       name: 'pv',
       type: 'expandable',
-      title: 'PV input (top-left, optional)',
+      title: 'PV input (top-left)',
       schema: [
         { name: 'entity', selector: ENTITY_SELECTOR },
         { name: 'name', selector: { text: {} } },
@@ -1181,9 +1232,9 @@ function buildEditorSchema(config) {
     {
       name: 'grid',
       type: 'expandable',
-      title: 'Grid input (top-right, required)',
+      title: 'Grid input (top-right)',
       schema: [
-        { name: 'entity', required: true, selector: ENTITY_SELECTOR },
+        { name: 'entity', selector: ENTITY_SELECTOR },
         { name: 'name', selector: { text: {} } },
         { name: 'icon', selector: { icon: {} } },
       ],
@@ -1191,7 +1242,7 @@ function buildEditorSchema(config) {
     {
       name: 'dc',
       type: 'expandable',
-      title: 'DC output (bottom-left, optional)',
+      title: 'DC output (bottom-left)',
       schema: [
         { name: 'entity', selector: ENTITY_SELECTOR },
         { name: 'name', selector: { text: {} } },
@@ -1201,9 +1252,9 @@ function buildEditorSchema(config) {
     {
       name: 'ac',
       type: 'expandable',
-      title: 'AC output (bottom-right, required)',
+      title: 'AC output (bottom-right)',
       schema: [
-        { name: 'entity', required: true, selector: ENTITY_SELECTOR },
+        { name: 'entity', selector: ENTITY_SELECTOR },
         { name: 'name', selector: { text: {} } },
         { name: 'icon', selector: { icon: {} } },
       ],
@@ -1268,7 +1319,7 @@ class IntegratedUpsFlowCardEditor extends HTMLElement {
       const hint = document.createElement('div');
       hint.className = 'hint';
       hint.textContent =
-        'Required: Grid and AC. PV and DC are optional — their corners show "—" when empty.';
+        'Every field is optional. Configured corners are clickable (opens the entity more-info dialog); unconfigured corners are hidden along with their flow line.';
       this.shadowRoot.appendChild(hint);
 
       const form = document.createElement('ha-form');
