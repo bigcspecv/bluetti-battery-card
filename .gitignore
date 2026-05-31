@@ -25,6 +25,9 @@ pnpm-debug.log*
 *.swp
 *.swo
 
+# Local scratch
+.tmp/
+
 # OS
 .DS_Store
 Thumbs.db
