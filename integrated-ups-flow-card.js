@@ -19,7 +19,7 @@
  * Plain Web Component, no build step, no external imports.
  */
 
-const CARD_VERSION = '0.4.2';
+const CARD_VERSION = '0.4.3';
 const CARD_TAG = 'integrated-ups-flow-card';
 const EDITOR_TAG = `${CARD_TAG}-editor`;
 
@@ -628,6 +628,14 @@ class IntegratedUpsFlowCard extends HTMLElement {
     this._updateCorner('dc', c.dc, dcP, opt.idle_threshold, !!c.dc.entity);
     this._updateCorner('ac', c.ac, acP, opt.idle_threshold, !!c.ac.entity);
 
+    // When only one side has corners, shift the battery toward the empty side
+    // so the card doesn't look lopsided. With both / neither side populated,
+    // the battery stays centered.
+    const hasLeft = !!(c.pv.entity || c.dc.entity);
+    const hasRight = !!(c.grid.entity || c.ac.entity);
+    this._grid.classList.toggle('no-left', !hasLeft && hasRight);
+    this._grid.classList.toggle('no-right', hasLeft && !hasRight);
+
     // ---- Battery center ----
     const batteryClickable = !!c.unit.soc_entity && !isTemplate(c.unit.soc_entity);
     this._battery.root.classList.toggle('is-clickable', batteryClickable);
@@ -936,6 +944,27 @@ const STYLES = `
 .corner--bl { grid-area: dc; justify-self: start; }
 .corner--br { grid-area: ac; justify-self: end; }
 .battery-center { grid-area: battery; justify-self: center; align-self: center; }
+
+/* Balance the layout when only one side has corners: shift the battery
+   toward the empty side so the card stops looking lopsided. */
+.ups-grid.no-left {
+  grid-template-columns: 3fr 0.5fr 1fr;
+}
+.ups-grid.no-left .battery-center {
+  grid-column: 1 / 2;
+  grid-row: 1 / 4;
+  justify-self: center;
+  align-self: center;
+}
+.ups-grid.no-right {
+  grid-template-columns: 1fr 0.5fr 3fr;
+}
+.ups-grid.no-right .battery-center {
+  grid-column: 3 / 4;
+  grid-row: 1 / 4;
+  justify-self: center;
+  align-self: center;
+}
 
 /* Corner nodes ------------------------------------------------------- */
 .corner {
