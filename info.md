@@ -5,12 +5,13 @@ battery, inverter, charger, and transfer switch all live in a single sealed box
 (e.g. BLUETTI Elite 200 V2).
 
 ```
-GRID  -->  [ UNIT: battery + inverter ]  -->  LOAD
+   [ PV   ] ----,           ,---- [ GRID ]
+                 \  ( SoC )  /
+   [ DC   ] ----'           '---- [ AC   ]
 ```
 
-Unlike `power-flow-card-plus` (assumes home-centric topology) or
-`enhanced-power-flow-card` (assumes a split Victron-style inverter+battery), this
-card models the unit as a single node with battery state shown *inside* it.
+Four corners (PV/Grid inputs, DC/AC outputs) with a central semicircular
+state-of-charge gauge. Flow lines animate when their input/output is active.
 
 **Features**
 
@@ -18,9 +19,10 @@ card models the unit as a single node with battery state shown *inside* it.
 - Theme-aware (uses Home Assistant CSS custom properties)
 - Entity IDs **or** Jinja templates for every entity field (evaluated via the
   real HA WebSocket template API)
-- Animated power flow with speed scaled to wattage
-- Battery glyph with SoC fill plus charge/discharge indicators
-- Optional battery throughput and runtime display
-- Responsive — recomputes flow paths on resize
+- Animated power-flow lines with speed scaled to wattage
+- Semicircular SoC gauge whose color follows battery-level conventions
+- Optional DC and PV corners — show "—" when not configured
+- Backward-compatible: v0.1 configs using `load:` are accepted and rendered as
+  the AC corner
 
 See the README for full configuration and install instructions.

@@ -2,17 +2,24 @@
  * integrated-ups-flow-card
  * https://github.com/bigcspecv/bluetti-battery-card
  *
- * A Home Assistant Lovelace card for INTEGRATED UPS units — devices where the
- * battery, inverter, charger, and transfer switch all live in a single sealed
- * box (e.g. BLUETTI Elite 200 V2). Renders a three-node flow:
+ * A Home Assistant Lovelace card for INTEGRATED UPS units — devices where
+ * the battery, inverter, charger, and transfer switch all live in a single
+ * sealed box (e.g. BLUETTI Elite 200 V2).
  *
- *     GRID  -->  [ UNIT: battery + inverter ]  -->  LOAD
+ * Layout (v0.2):
  *
- * Plain Web Component, no build step, no external imports — a single file
- * served by HACS.
+ *   [ PV   ]----,         ,----[ GRID ]
+ *               |  ( SoC )  |
+ *   [ DC   ]----'         '----[ AC   ]
+ *
+ * Four corner nodes (PV/Grid in, DC/AC out) with an arc gauge in the
+ * middle showing battery state of charge. Lines from each corner are
+ * L-shaped with rounded corners and animated when their flow is active.
+ *
+ * Plain Web Component, no build step, no external imports.
  */
 
-const CARD_VERSION = '0.1.0';
+const CARD_VERSION = '0.2.0';
 const CARD_TAG = 'integrated-ups-flow-card';
 
 console.info(
@@ -27,7 +34,7 @@ if (!window.customCards.find((c) => c && c.type === CARD_TAG)) {
     type: CARD_TAG,
     name: 'Integrated UPS Flow Card',
     description:
-      'Three-node power flow for integrated UPS units (battery + inverter in one box) like BLUETTI Elite 200 V2.',
+      'Four-corner power flow with a central battery arc for integrated UPS units (battery + inverter in one box) like BLUETTI Elite 200 V2.',
     preview: false,
     documentationURL: 'https://github.com/bigcspecv/bluetti-battery-card',
   });
@@ -38,9 +45,18 @@ const DEFAULTS = {
   max_power: 2600,
 };
 
-// Animation: longer dur = slower dots; we map low power -> slow, high -> fast.
+// Flow animation: longer dur = slower; low power -> slow, high -> fast.
 const ANIM_SLOW_S = 4.0;
-const ANIM_FAST_S = 1.0;
+const ANIM_FAST_S = 1.2;
+
+// Arc gauge geometry (in viewBox units; the SVG is scaled to its container).
+const ARC_VB = 200; // square viewBox edge
+const ARC_CX = ARC_VB / 2;
+const ARC_CY = ARC_VB / 2;
+const ARC_R = 78;
+const ARC_STROKE = 12;
+const ARC_START_DEG = 225; // bottom-left
+const ARC_SWEEP_DEG = 270; // clockwise through the top to bottom-right
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const XLINK_NS = 'http://www.w3.org/1999/xlink';
@@ -76,12 +92,48 @@ function fmtRuntime(min) {
   return `${h}h ${m}m`;
 }
 
+function polarToCartesian(cx, cy, r, angleDeg) {
+  // 0° = 12 o'clock, increases clockwise.
+  const a = ((angleDeg - 90) * Math.PI) / 180;
+  return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+}
+
+function describeArc(cx, cy, r, startDeg, sweepDeg) {
+  if (sweepDeg <= 0) return '';
+  const startPt = polarToCartesian(cx, cy, r, startDeg);
+  const endPt = polarToCartesian(cx, cy, r, startDeg + sweepDeg);
+  const largeArc = sweepDeg > 180 ? 1 : 0;
+  return `M ${startPt.x.toFixed(2)} ${startPt.y.toFixed(2)} A ${r} ${r} 0 ${largeArc} 1 ${endPt.x.toFixed(2)} ${endPt.y.toFixed(2)}`;
+}
+
+// L-shaped path from start to end with rounded corner at (start.x, end.y).
+// All four corner-to-center paths use "vertical first, then horizontal"
+// because the corners are placed above/below the center row.
+function buildVThenHPath(start, end, cornerR) {
+  if (Math.abs(start.x - end.x) < 0.5 && Math.abs(start.y - end.y) < 0.5) return '';
+  const dirY = Math.sign(end.y - start.y) || 1;
+  const dirX = Math.sign(end.x - start.x) || 1;
+  // If the horizontal offset is too small to fit a rounded corner, fall back to a straight line.
+  const vDist = Math.abs(end.y - start.y);
+  const hDist = Math.abs(end.x - start.x);
+  if (vDist < cornerR + 1 || hDist < cornerR + 1) {
+    return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
+  }
+  const cx = start.x;
+  const cy = end.y;
+  const beforeY = cy - dirY * cornerR;
+  const afterX = cx + dirX * cornerR;
+  return `M ${start.x} ${start.y} L ${cx} ${beforeY} Q ${cx} ${cy} ${afterX} ${cy} L ${end.x} ${end.y}`;
+}
+
 class IntegratedUpsFlowCard extends HTMLElement {
   static getStubConfig() {
     return {
       title: 'Integrated UPS',
+      pv: { entity: '', name: 'PV', icon: 'mdi:solar-panel' },
       grid: { entity: '', name: 'Grid', icon: 'mdi:transmission-tower' },
-      load: { entity: '', name: 'Load', icon: 'mdi:home' },
+      dc: { entity: '', name: 'DC', icon: 'mdi:current-dc' },
+      ac: { entity: '', name: 'AC', icon: 'mdi:power-plug' },
       unit: {
         name: 'UPS',
         icon: 'mdi:power-socket-us',
@@ -107,38 +159,54 @@ class IntegratedUpsFlowCard extends HTMLElement {
     this._renderQueued = false;
     this._resizeObserver = null;
     this._resizeTimer = null;
-    this._currentDur = { grid: 0, load: 0 };
   }
 
   // ----- Lovelace lifecycle -----
 
   setConfig(config) {
     if (!config) throw new Error('Invalid configuration');
-    if (!config.grid || !config.grid.entity)
-      throw new Error("Missing required config: 'grid.entity'");
-    if (!config.load || !config.load.entity)
-      throw new Error("Missing required config: 'load.entity'");
+
+    // Back-compat: v0.1 used `load:` for AC output. Accept it as an alias for `ac:`.
+    const ac = config.ac || config.load || {};
+    const grid = config.grid || {};
+    const pv = config.pv || {};
+    const dc = config.dc || {};
+    const unit = config.unit || {};
+
+    if (!grid.entity) throw new Error("Missing required config: 'grid.entity'");
+    if (!ac.entity) throw new Error("Missing required config: 'ac.entity' (or 'load.entity')");
     if (!config.unit) throw new Error("Missing required config: 'unit'");
 
     const opts = config.options || {};
+
     this._config = {
       title: config.title ?? null,
-      grid: {
-        entity: String(config.grid.entity),
-        name: config.grid.name || 'Grid',
-        icon: config.grid.icon || 'mdi:transmission-tower',
+      pv: {
+        entity: pv.entity ? String(pv.entity) : null,
+        name: pv.name || 'PV',
+        icon: pv.icon || 'mdi:solar-panel',
       },
-      load: {
-        entity: String(config.load.entity),
-        name: config.load.name || 'Load',
-        icon: config.load.icon || 'mdi:home',
+      grid: {
+        entity: String(grid.entity),
+        name: grid.name || 'Grid',
+        icon: grid.icon || 'mdi:transmission-tower',
+      },
+      dc: {
+        entity: dc.entity ? String(dc.entity) : null,
+        name: dc.name || 'DC',
+        icon: dc.icon || 'mdi:current-dc',
+      },
+      ac: {
+        entity: String(ac.entity),
+        name: ac.name || 'AC',
+        icon: ac.icon || 'mdi:power-plug',
       },
       unit: {
-        name: config.unit.name || 'UPS',
-        icon: config.unit.icon || 'mdi:power-socket-us',
-        soc_entity: config.unit.soc_entity ? String(config.unit.soc_entity) : null,
-        runtime_entity: config.unit.runtime_entity ? String(config.unit.runtime_entity) : null,
-        power_entity: config.unit.power_entity ? String(config.unit.power_entity) : null,
+        name: unit.name || 'UPS',
+        icon: unit.icon || 'mdi:power-socket-us',
+        soc_entity: unit.soc_entity ? String(unit.soc_entity) : null,
+        runtime_entity: unit.runtime_entity ? String(unit.runtime_entity) : null,
+        power_entity: unit.power_entity ? String(unit.power_entity) : null,
       },
       options: {
         idle_threshold: Number.isFinite(opts.idle_threshold)
@@ -192,7 +260,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
   }
 
   getCardSize() {
-    return 4;
+    return 5;
   }
 
   // ----- Template subscriptions (real HA WS API) -----
@@ -201,8 +269,10 @@ class IntegratedUpsFlowCard extends HTMLElement {
     if (!this._config) return [];
     const c = this._config;
     return [
+      c.pv.entity,
       c.grid.entity,
-      c.load.entity,
+      c.dc.entity,
+      c.ac.entity,
       c.unit.soc_entity,
       c.unit.runtime_entity,
       c.unit.power_entity,
@@ -216,9 +286,8 @@ class IntegratedUpsFlowCard extends HTMLElement {
       try {
         const promise = this._hass.connection.subscribeMessage(
           (msg) => {
-            const result = msg && Object.prototype.hasOwnProperty.call(msg, 'result')
-              ? msg.result
-              : msg;
+            const result =
+              msg && Object.prototype.hasOwnProperty.call(msg, 'result') ? msg.result : msg;
             this._templateResults.set(tpl, result);
             this._scheduleRender();
           },
@@ -282,184 +351,150 @@ class IntegratedUpsFlowCard extends HTMLElement {
     card.appendChild(wrap);
     this._wrap = wrap;
 
+    // SVG overlay for all connection paths and the SoC arc.
     const svg = document.createElementNS(SVG_NS, 'svg');
     svg.setAttribute('class', 'ups-svg');
     svg.setAttribute('preserveAspectRatio', 'none');
     wrap.appendChild(svg);
     this._svg = svg;
 
-    const gridPath = document.createElementNS(SVG_NS, 'path');
-    gridPath.setAttribute('id', `${CARD_TAG}-grid-path-${++IntegratedUpsFlowCard._uid}`);
-    gridPath.setAttribute('class', 'flow-path flow-path--grid');
-    svg.appendChild(gridPath);
-    this._gridPath = gridPath;
+    // One <g> for the four flow paths.
+    const flowGroup = document.createElementNS(SVG_NS, 'g');
+    flowGroup.setAttribute('class', 'flow-group');
+    svg.appendChild(flowGroup);
+    this._flowGroup = flowGroup;
 
-    const loadPath = document.createElementNS(SVG_NS, 'path');
-    loadPath.setAttribute('id', `${CARD_TAG}-load-path-${IntegratedUpsFlowCard._uid}`);
-    loadPath.setAttribute('class', 'flow-path flow-path--load');
-    svg.appendChild(loadPath);
-    this._loadPath = loadPath;
-
-    this._gridDots = this._createDotsGroup(gridPath.getAttribute('id'), 'flow-dots--grid');
-    svg.appendChild(this._gridDots);
-
-    this._loadDots = this._createDotsGroup(loadPath.getAttribute('id'), 'flow-dots--load');
-    svg.appendChild(this._loadDots);
-
-    const nodes = document.createElement('div');
-    nodes.className = 'ups-nodes';
-    wrap.appendChild(nodes);
-    this._nodes = nodes;
-
-    this._gridNode = this._createSideNode('grid');
-    nodes.appendChild(this._gridNode.root);
-
-    this._unitNode = this._createUnitNode();
-    nodes.appendChild(this._unitNode.root);
-
-    this._loadNode = this._createSideNode('load');
-    nodes.appendChild(this._loadNode.root);
-  }
-
-  _createDotsGroup(pathId, extraClass) {
-    const g = document.createElementNS(SVG_NS, 'g');
-    g.setAttribute('class', `flow-dots ${extraClass}`);
-    const dotCount = 3;
-    const dots = [];
-    for (let i = 0; i < dotCount; i++) {
-      const c = document.createElementNS(SVG_NS, 'circle');
-      c.setAttribute('r', '4');
-      c.setAttribute('class', 'flow-dot');
-      c.setAttribute('cx', '0');
-      c.setAttribute('cy', '0');
-      const m = document.createElementNS(SVG_NS, 'animateMotion');
-      m.setAttribute('dur', `${ANIM_SLOW_S}s`);
-      m.setAttribute('repeatCount', 'indefinite');
-      m.setAttribute('begin', `${(i / dotCount) * ANIM_SLOW_S}s`);
-      m.setAttribute('rotate', '0');
-      m.setAttribute('fill', 'freeze');
-      const mp = document.createElementNS(SVG_NS, 'mpath');
-      mp.setAttributeNS(XLINK_NS, 'xlink:href', `#${pathId}`);
-      mp.setAttribute('href', `#${pathId}`);
-      m.appendChild(mp);
-      c.appendChild(m);
-      g.appendChild(c);
-      dots.push({ circle: c, motion: m });
+    this._flowPaths = {};
+    for (const key of ['pv', 'grid', 'dc', 'ac']) {
+      const base = document.createElementNS(SVG_NS, 'path');
+      base.setAttribute('class', `flow-base flow-base--${key}`);
+      flowGroup.appendChild(base);
+      const overlay = document.createElementNS(SVG_NS, 'path');
+      overlay.setAttribute('class', `flow-overlay flow-overlay--${key}`);
+      flowGroup.appendChild(overlay);
+      this._flowPaths[key] = { base, overlay };
     }
-    g._dots = dots;
-    return g;
+
+    // HTML grid for the four corner nodes (the SVG center cell stays empty;
+    // the battery info sits inside it as HTML on top of the SVG arc).
+    const grid = document.createElement('div');
+    grid.className = 'ups-grid';
+    wrap.appendChild(grid);
+    this._grid = grid;
+
+    this._cornerNodes = {
+      pv: this._createCornerNode('pv', 'tl'),
+      grid: this._createCornerNode('grid', 'tr'),
+      dc: this._createCornerNode('dc', 'bl'),
+      ac: this._createCornerNode('ac', 'br'),
+    };
+    grid.appendChild(this._cornerNodes.pv.root);
+    grid.appendChild(this._cornerNodes.grid.root);
+    grid.appendChild(this._cornerNodes.dc.root);
+    grid.appendChild(this._cornerNodes.ac.root);
+
+    // Center battery info (overlaid on the SoC arc, which lives in SVG).
+    this._battery = this._createBatteryCenter();
+    grid.appendChild(this._battery.root);
   }
 
-  _createSideNode(kind) {
+  _createCornerNode(key, position) {
     const root = document.createElement('div');
-    root.className = `ups-node ups-node--${kind}`;
+    root.className = `corner corner--${key} corner--${position}`;
+
     const iconWrap = document.createElement('div');
-    iconWrap.className = 'ups-node__icon-wrap';
+    iconWrap.className = 'corner__icon-wrap';
     const icon = document.createElement('ha-icon');
-    icon.className = 'ups-node__icon';
+    icon.className = 'corner__icon';
     iconWrap.appendChild(icon);
-    const name = document.createElement('div');
-    name.className = 'ups-node__name';
+
+    const meta = document.createElement('div');
+    meta.className = 'corner__meta';
     const power = document.createElement('div');
-    power.className = 'ups-node__power';
-    root.appendChild(iconWrap);
-    root.appendChild(name);
-    root.appendChild(power);
-    return { root, icon, name, power };
+    power.className = 'corner__power';
+    const name = document.createElement('div');
+    name.className = 'corner__name';
+    meta.appendChild(power);
+    meta.appendChild(name);
+
+    if (position === 'tl' || position === 'bl') {
+      root.appendChild(iconWrap);
+      root.appendChild(meta);
+    } else {
+      root.appendChild(meta);
+      root.appendChild(iconWrap);
+    }
+    return { root, icon, name, power, iconWrap };
   }
 
-  _createUnitNode() {
+  _createBatteryCenter() {
     const root = document.createElement('div');
-    root.className = 'ups-node ups-node--unit ups-node--idle';
+    root.className = 'battery-center';
+
+    // The SoC arc is rendered as its own inline SVG (separate from the
+    // outer connection-paths SVG) so it can scale neatly via CSS.
+    const arcSvg = document.createElementNS(SVG_NS, 'svg');
+    arcSvg.setAttribute('class', 'soc-svg');
+    arcSvg.setAttribute('viewBox', `0 0 ${ARC_VB} ${ARC_VB}`);
+    arcSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+
+    const arcBg = document.createElementNS(SVG_NS, 'path');
+    arcBg.setAttribute('class', 'soc-arc-bg');
+    arcBg.setAttribute('d', describeArc(ARC_CX, ARC_CY, ARC_R, ARC_START_DEG, ARC_SWEEP_DEG));
+    arcSvg.appendChild(arcBg);
+
+    const arcFill = document.createElementNS(SVG_NS, 'path');
+    arcFill.setAttribute('class', 'soc-arc-fill');
+    arcFill.setAttribute('d', '');
+    arcSvg.appendChild(arcFill);
+
+    root.appendChild(arcSvg);
+
+    const content = document.createElement('div');
+    content.className = 'battery-content';
 
     const iconWrap = document.createElement('div');
-    iconWrap.className = 'ups-node__icon-wrap unit-icon-wrap';
+    iconWrap.className = 'battery-icon-wrap';
     const icon = document.createElement('ha-icon');
-    icon.className = 'ups-node__icon';
+    icon.className = 'battery-icon';
     iconWrap.appendChild(icon);
 
-    const name = document.createElement('div');
-    name.className = 'ups-node__name unit-name';
+    const soc = document.createElement('div');
+    soc.className = 'battery-soc';
+    const socUnit = document.createElement('span');
+    socUnit.className = 'battery-soc-unit';
+    socUnit.textContent = '%';
+    soc.appendChild(document.createTextNode(''));
+    soc.appendChild(socUnit);
 
-    const battery = document.createElementNS(SVG_NS, 'svg');
-    battery.setAttribute('class', 'battery-glyph');
-    battery.setAttribute('viewBox', '0 0 100 40');
-    battery.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-
-    const batBody = document.createElementNS(SVG_NS, 'rect');
-    batBody.setAttribute('x', '1');
-    batBody.setAttribute('y', '2');
-    batBody.setAttribute('width', '90');
-    batBody.setAttribute('height', '36');
-    batBody.setAttribute('rx', '5');
-    batBody.setAttribute('ry', '5');
-    batBody.setAttribute('class', 'battery-body');
-    battery.appendChild(batBody);
-
-    const batCap = document.createElementNS(SVG_NS, 'rect');
-    batCap.setAttribute('x', '92');
-    batCap.setAttribute('y', '12');
-    batCap.setAttribute('width', '6');
-    batCap.setAttribute('height', '16');
-    batCap.setAttribute('rx', '2');
-    batCap.setAttribute('class', 'battery-cap');
-    battery.appendChild(batCap);
-
-    const batFill = document.createElementNS(SVG_NS, 'rect');
-    batFill.setAttribute('x', '4');
-    batFill.setAttribute('y', '5');
-    batFill.setAttribute('height', '30');
-    batFill.setAttribute('rx', '3');
-    batFill.setAttribute('width', '0');
-    batFill.setAttribute('class', 'battery-fill');
-    battery.appendChild(batFill);
-
-    const bolt = document.createElementNS(SVG_NS, 'path');
-    bolt.setAttribute('class', 'battery-bolt');
-    bolt.setAttribute(
-      'd',
-      'M50 6 L34 23 L46 23 L42 34 L60 17 L48 17 Z'
-    );
-    battery.appendChild(bolt);
-
-    const arrow = document.createElementNS(SVG_NS, 'path');
-    arrow.setAttribute('class', 'battery-arrow');
-    arrow.setAttribute('d', 'M30 20 L60 20 M52 14 L60 20 L52 26');
-    battery.appendChild(arrow);
-
-    const socLabel = document.createElement('div');
-    socLabel.className = 'unit-soc';
-
-    const stateLabel = document.createElement('div');
-    stateLabel.className = 'unit-state';
+    const state = document.createElement('div');
+    state.className = 'battery-state';
 
     const throughput = document.createElement('div');
-    throughput.className = 'unit-throughput';
+    throughput.className = 'battery-throughput';
 
     const runtime = document.createElement('div');
-    runtime.className = 'unit-runtime';
+    runtime.className = 'battery-runtime';
 
-    root.appendChild(iconWrap);
-    root.appendChild(name);
-    root.appendChild(battery);
-    root.appendChild(socLabel);
-    root.appendChild(stateLabel);
-    root.appendChild(throughput);
-    root.appendChild(runtime);
+    content.appendChild(iconWrap);
+    content.appendChild(soc);
+    content.appendChild(state);
+    content.appendChild(throughput);
+    content.appendChild(runtime);
+
+    root.appendChild(content);
 
     return {
       root,
+      arcSvg,
+      arcBg,
+      arcFill,
       icon,
-      name,
-      batBody,
-      batCap,
-      batFill,
-      bolt,
-      arrow,
-      socLabel,
-      stateLabel,
-      throughput,
-      runtime,
+      socText: soc.childNodes[0],
+      socEl: soc,
+      stateEl: state,
+      throughputEl: throughput,
+      runtimeEl: runtime,
     };
   }
 
@@ -491,99 +526,113 @@ class IntegratedUpsFlowCard extends HTMLElement {
       this._header.style.display = 'none';
     }
 
+    // Read raw values, clamping where the spec is "import only".
+    const pvP = c.pv.entity ? Math.max(0, toNum(this._getRaw(c.pv.entity))) : 0;
     const gridP = Math.max(0, toNum(this._getRaw(c.grid.entity)));
-    const loadP = toNum(this._getRaw(c.load.entity));
+    const dcP = c.dc.entity ? Math.max(0, toNum(this._getRaw(c.dc.entity))) : 0;
+    const acP = Math.max(0, toNum(this._getRaw(c.ac.entity)));
 
     let battP;
     if (c.unit.power_entity) {
       battP = toNum(this._getRaw(c.unit.power_entity));
       if (opt.invert_battery_sign) battP = -battP;
     } else {
-      battP = gridP - loadP;
+      // Charge = sources in - loads out. Sources: grid + pv. Loads: ac + dc.
+      battP = gridP + pvP - acP - dcP;
     }
 
     const soc = c.unit.soc_entity ? clamp(toNum(this._getRaw(c.unit.soc_entity)), 0, 100) : null;
     const runtimeMin = c.unit.runtime_entity ? toNum(this._getRaw(c.unit.runtime_entity)) : null;
 
-    // ---- Side nodes ----
-    this._gridNode.icon.setAttribute('icon', c.grid.icon);
-    this._gridNode.name.textContent = c.grid.name;
-    this._gridNode.power.textContent = fmtPower(gridP);
-    const gridActive = gridP > opt.idle_threshold;
-    this._gridNode.root.classList.toggle('is-active', gridActive);
+    // ---- Corner nodes ----
+    this._updateCorner('pv', c.pv, pvP, opt.idle_threshold, c.pv.entity != null);
+    this._updateCorner('grid', c.grid, gridP, opt.idle_threshold, true);
+    this._updateCorner('dc', c.dc, dcP, opt.idle_threshold, c.dc.entity != null);
+    this._updateCorner('ac', c.ac, acP, opt.idle_threshold, true);
 
-    this._loadNode.icon.setAttribute('icon', c.load.icon);
-    this._loadNode.name.textContent = c.load.name;
-    this._loadNode.power.textContent = fmtPower(Math.abs(loadP));
-    const loadActive = loadP > opt.idle_threshold;
-    this._loadNode.root.classList.toggle('is-active', loadActive);
-
-    // ---- Unit node ----
-    this._unitNode.icon.setAttribute('icon', c.unit.icon);
-    this._unitNode.name.textContent = c.unit.name;
+    // ---- Battery center ----
+    this._battery.icon.setAttribute('icon', this._batteryIconForState(soc, battP, opt.idle_threshold));
     if (soc === null) {
-      this._unitNode.socLabel.textContent = '';
-      this._unitNode.batFill.setAttribute('width', '0');
+      this._battery.socText.nodeValue = '—';
+      this._battery.arcFill.setAttribute('d', '');
     } else {
-      this._unitNode.socLabel.textContent = `${Math.round(soc)}%`;
-      // body is x=1, width=90 -> usable inner span ~4..91
-      const fillW = Math.max(0, Math.min(86, (soc / 100) * 86));
-      this._unitNode.batFill.setAttribute('width', String(fillW));
+      this._battery.socText.nodeValue = String(Math.round(soc));
+      this._battery.arcFill.setAttribute(
+        'd',
+        describeArc(ARC_CX, ARC_CY, ARC_R, ARC_START_DEG, (ARC_SWEEP_DEG * soc) / 100)
+      );
     }
 
-    let state, accent;
+    let stateClass;
+    let stateLabel;
     if (battP > opt.idle_threshold) {
-      state = 'charging';
-      accent = 'charge';
+      stateClass = 'charge';
+      stateLabel = 'charging';
     } else if (battP < -opt.idle_threshold) {
-      state = 'discharging';
-      accent = 'discharge';
+      stateClass = 'discharge';
+      stateLabel = 'discharging';
     } else {
-      state = 'idle';
-      accent = 'idle';
+      stateClass = 'idle';
+      stateLabel = 'idle';
     }
-    this._unitNode.root.classList.remove(
-      'ups-node--charge',
-      'ups-node--discharge',
-      'ups-node--idle'
-    );
-    this._unitNode.root.classList.add(`ups-node--${accent}`);
-    this._unitNode.stateLabel.textContent = state;
-    this._unitNode.throughput.textContent =
-      accent === 'idle' ? '' : `${accent === 'charge' ? '+' : '−'}${fmtPower(Math.abs(battP))}`;
-    this._unitNode.runtime.textContent =
+    this._battery.root.classList.remove('state-charge', 'state-discharge', 'state-idle');
+    this._battery.root.classList.add(`state-${stateClass}`);
+    this._battery.stateEl.textContent = stateLabel;
+    this._battery.throughputEl.textContent =
+      stateClass === 'idle'
+        ? ''
+        : `${stateClass === 'charge' ? '+' : '−'}${fmtPower(Math.abs(battP))}`;
+    this._battery.runtimeEl.textContent =
       c.unit.runtime_entity && runtimeMin && runtimeMin > 0 ? fmtRuntime(runtimeMin) : '';
 
-    // ---- Flow paths ----
-    this._gridPath.classList.toggle('is-active', gridActive);
-    this._loadPath.classList.toggle('is-active', loadActive);
-    this._gridDots.classList.toggle('is-active', gridActive);
-    this._loadDots.classList.toggle('is-active', loadActive);
+    // SoC level class drives the arc fill color.
+    const socLevel =
+      soc === null ? 'unknown' : soc > 60 ? 'high' : soc > 20 ? 'medium' : 'low';
+    this._battery.root.classList.remove('soc-high', 'soc-medium', 'soc-low', 'soc-unknown');
+    this._battery.root.classList.add(`soc-${socLevel}`);
 
-    this._maybeSetDur('grid', this._gridDots, this._durFromPower(gridP, opt.max_power));
-    this._maybeSetDur('load', this._loadDots, this._durFromPower(loadP, opt.max_power));
+    // ---- Flow paths active state & speed ----
+    this._setFlowState('pv', pvP > opt.idle_threshold, pvP, opt.max_power);
+    this._setFlowState('grid', gridP > opt.idle_threshold, gridP, opt.max_power);
+    this._setFlowState('dc', dcP > opt.idle_threshold, dcP, opt.max_power);
+    this._setFlowState('ac', acP > opt.idle_threshold, acP, opt.max_power);
 
+    // Recompute path geometry — node positions can shift on resize.
     this._updatePaths();
+  }
+
+  _batteryIconForState(soc, battP, idle) {
+    const charging = battP > idle;
+    const buckets = [10, 20, 30, 40, 50, 60, 70, 80, 90];
+    if (soc === null) return 'mdi:battery-unknown';
+    let nearest = 100;
+    for (const b of buckets) if (soc <= b) { nearest = b; break; }
+    if (nearest === 100) return charging ? 'mdi:battery-charging-100' : 'mdi:battery';
+    return charging ? `mdi:battery-charging-${nearest}` : `mdi:battery-${nearest}`;
+  }
+
+  _updateCorner(key, cfg, power, idle, present) {
+    const node = this._cornerNodes[key];
+    node.icon.setAttribute('icon', cfg.icon);
+    node.name.textContent = cfg.name;
+    node.power.textContent = present ? fmtPower(power) : '—';
+    const active = present && power > idle;
+    node.root.classList.toggle('is-active', active);
+    node.root.classList.toggle('is-absent', !present);
+  }
+
+  _setFlowState(key, active, power, maxPower) {
+    const p = this._flowPaths[key];
+    if (!p) return;
+    p.base.classList.toggle('is-active', active);
+    p.overlay.classList.toggle('is-active', active);
+    const dur = this._durFromPower(power, maxPower);
+    p.overlay.style.setProperty('--flow-dur', `${dur.toFixed(2)}s`);
   }
 
   _durFromPower(p, maxP) {
     const ratio = clamp(Math.abs(p) / Math.max(1, maxP), 0, 1);
     return ANIM_SLOW_S - (ANIM_SLOW_S - ANIM_FAST_S) * ratio;
-  }
-
-  // Only update animation timings when the change is meaningful (avoids constant
-  // restart hiccups from SMIL when state nudges by 1W every tick).
-  _maybeSetDur(key, group, dur) {
-    const last = this._currentDur[key] || 0;
-    if (Math.abs(last - dur) < 0.15) return;
-    this._currentDur[key] = dur;
-    if (!group._dots) return;
-    const n = group._dots.length;
-    for (let i = 0; i < n; i++) {
-      const motion = group._dots[i].motion;
-      motion.setAttribute('dur', `${dur.toFixed(2)}s`);
-      motion.setAttribute('begin', `${((i / n) * dur).toFixed(2)}s`);
-    }
   }
 
   _updatePaths() {
@@ -595,38 +644,52 @@ class IntegratedUpsFlowCard extends HTMLElement {
     this._svg.setAttribute('width', String(w));
     this._svg.setAttribute('height', String(h));
 
-    const gridRect = this._gridNode.root.getBoundingClientRect();
-    const unitRect = this._unitNode.root.getBoundingClientRect();
-    const loadRect = this._loadNode.root.getBoundingClientRect();
     const wrapRect = this._wrap.getBoundingClientRect();
 
-    const gridR = {
-      x: gridRect.right - wrapRect.left,
-      y: gridRect.top + gridRect.height / 2 - wrapRect.top,
-    };
-    const unitL = {
-      x: unitRect.left - wrapRect.left,
-      y: unitRect.top + unitRect.height / 2 - wrapRect.top,
-    };
-    const unitR = {
-      x: unitRect.right - wrapRect.left,
-      y: unitRect.top + unitRect.height / 2 - wrapRect.top,
-    };
-    const loadL = {
-      x: loadRect.left - wrapRect.left,
-      y: loadRect.top + loadRect.height / 2 - wrapRect.top,
+    const cornerRect = (key) => {
+      const r = this._cornerNodes[key].iconWrap.getBoundingClientRect();
+      return {
+        x: r.left + r.width / 2 - wrapRect.left,
+        y: r.top + r.height / 2 - wrapRect.top,
+        w: r.width,
+        h: r.height,
+      };
     };
 
-    this._gridPath.setAttribute('d', this._buildPath(gridR, unitL));
-    this._loadPath.setAttribute('d', this._buildPath(unitR, loadL));
-  }
+    const batteryRect = this._battery.arcSvg.getBoundingClientRect();
+    const battCenter = {
+      x: batteryRect.left + batteryRect.width / 2 - wrapRect.left,
+      y: batteryRect.top + batteryRect.height / 2 - wrapRect.top,
+    };
+    // Effective arc radius in screen pixels (the SVG scales the viewBox).
+    const arcScreenR = (Math.min(batteryRect.width, batteryRect.height) / ARC_VB) * ARC_R;
 
-  _buildPath(a, b) {
-    const dx = b.x - a.x;
-    const cp1x = a.x + dx * 0.4;
-    const cp2x = a.x + dx * 0.6;
-    const sag = Math.max(6, Math.abs(dx) * 0.04);
-    return `M ${a.x} ${a.y} C ${cp1x} ${a.y + sag} ${cp2x} ${b.y + sag} ${b.x} ${b.y}`;
+    // Anchor points on a square outside the arc. Slightly farther than the arc
+    // radius so the lines don't crash into the gauge stroke.
+    const anchorGap = 6;
+    const anchorR = arcScreenR + anchorGap;
+    const anchors = {
+      pv: { x: battCenter.x - anchorR, y: battCenter.y + arcScreenR * 0.45 },
+      grid: { x: battCenter.x + anchorR, y: battCenter.y + arcScreenR * 0.45 },
+      dc: { x: battCenter.x - anchorR, y: battCenter.y - arcScreenR * 0.45 },
+      ac: { x: battCenter.x + anchorR, y: battCenter.y - arcScreenR * 0.45 },
+    };
+
+    // Each path starts at the inner edge of the corner node (vertically
+    // toward the middle row) and ends at the matching anchor.
+    const cornerRadius = 18;
+    const starts = {};
+    for (const key of ['pv', 'grid', 'dc', 'ac']) {
+      const r = cornerRect(key);
+      const onTop = key === 'pv' || key === 'grid';
+      starts[key] = { x: r.x, y: r.y + (onTop ? r.h / 2 : -r.h / 2) };
+    }
+
+    for (const key of ['pv', 'grid', 'dc', 'ac']) {
+      const d = buildVThenHPath(starts[key], anchors[key], cornerRadius);
+      this._flowPaths[key].base.setAttribute('d', d);
+      this._flowPaths[key].overlay.setAttribute('d', d);
+    }
   }
 
   // ----- Resize handling -----
@@ -656,8 +719,6 @@ class IntegratedUpsFlowCard extends HTMLElement {
   }
 }
 
-IntegratedUpsFlowCard._uid = 0;
-
 const STYLES = `
 :host {
   display: block;
@@ -676,7 +737,7 @@ const STYLES = `
 .ups-wrap {
   position: relative;
   width: 100%;
-  min-height: 240px;
+  min-height: 320px;
 }
 .ups-svg {
   position: absolute;
@@ -687,220 +748,219 @@ const STYLES = `
   z-index: 0;
   overflow: visible;
 }
-.flow-path {
-  fill: none;
-  stroke: var(--divider-color, rgba(127, 127, 127, 0.4));
-  stroke-width: 2.5;
-  stroke-linecap: round;
-  transition: stroke 0.3s ease, opacity 0.3s ease;
-  opacity: 0.7;
-}
-.flow-path.is-active.flow-path--grid {
-  stroke: var(--primary-color, #03a9f4);
-  opacity: 1;
-}
-.flow-path.is-active.flow-path--load {
-  stroke: var(--warning-color, #ff9800);
-  opacity: 1;
-}
-.flow-dot {
-  fill: var(--divider-color, rgba(127, 127, 127, 0.6));
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
-.flow-dots.is-active .flow-dot {
-  opacity: 1;
-}
-.flow-dots--grid.is-active .flow-dot {
-  fill: var(--primary-color, #03a9f4);
-}
-.flow-dots--load.is-active .flow-dot {
-  fill: var(--warning-color, #ff9800);
-}
 
-.ups-nodes {
+/* Flow paths --------------------------------------------------------- */
+.flow-base {
+  fill: none;
+  stroke: var(--divider-color, rgba(127, 127, 127, 0.35));
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 0.3s ease, opacity 0.3s ease;
+}
+.flow-overlay {
+  fill: none;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 18 220;
+  opacity: 0;
+  transition: opacity 0.3s ease, stroke 0.3s ease;
+}
+.flow-overlay.is-active { opacity: 1; }
+
+.flow-overlay--pv.is-active   { stroke: var(--success-color, #4caf50); animation: flow-in  var(--flow-dur, 2s) linear infinite; }
+.flow-overlay--grid.is-active { stroke: var(--info-color, var(--primary-color, #03a9f4)); animation: flow-in  var(--flow-dur, 2s) linear infinite; }
+.flow-overlay--ac.is-active   { stroke: var(--warning-color, #ff9800); animation: flow-out var(--flow-dur, 2s) linear infinite; }
+.flow-overlay--dc.is-active   { stroke: var(--state-binary-sensor-power-on-color, #64b5f6); animation: flow-out var(--flow-dur, 2s) linear infinite; }
+
+@keyframes flow-in  { from { stroke-dashoffset: 240; } to { stroke-dashoffset: 0; } }
+@keyframes flow-out { from { stroke-dashoffset: 0; }   to { stroke-dashoffset: 240; } }
+
+/* Grid layout -------------------------------------------------------- */
+.ups-grid {
   position: relative;
   display: grid;
-  grid-template-columns: 1fr 1.4fr 1fr;
+  grid-template-columns: 1fr 1.8fr 1fr;
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "pv     .       grid"
+    ".      battery .   "
+    "dc     .       ac  ";
   align-items: center;
-  gap: 8px;
   z-index: 1;
   width: 100%;
-  min-height: 240px;
+  min-height: 320px;
+  gap: 8px;
 }
-.ups-node {
-  display: flex;
-  flex-direction: column;
+.corner--tl { grid-area: pv; justify-self: start; }
+.corner--tr { grid-area: grid; justify-self: end; }
+.corner--bl { grid-area: dc; justify-self: start; }
+.corner--br { grid-area: ac; justify-self: end; }
+.battery-center { grid-area: battery; justify-self: center; align-self: center; }
+
+/* Corner nodes ------------------------------------------------------- */
+.corner {
+  display: inline-flex;
   align-items: center;
-  text-align: center;
-  padding: 12px 8px;
-  background: var(--ha-card-background, var(--card-background-color, #ffffff));
-  border: 1.5px solid var(--divider-color, rgba(127, 127, 127, 0.25));
-  border-radius: 14px;
-  color: var(--primary-text-color, #212121);
-  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease;
+  gap: 10px;
   min-width: 0;
+  max-width: 100%;
 }
-.ups-node--unit {
-  padding: 14px 10px;
-  box-shadow: var(--ha-card-box-shadow, 0 1px 3px rgba(0, 0, 0, 0.08));
-}
-.ups-node__icon-wrap {
+.corner__icon-wrap {
   width: 44px;
   height: 44px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--secondary-background-color, rgba(127, 127, 127, 0.12));
-  margin-bottom: 6px;
-  transition: background 0.3s ease, color 0.3s ease;
+  background: var(--secondary-background-color, rgba(127, 127, 127, 0.14));
+  flex-shrink: 0;
+  transition: background 0.3s ease, color 0.3s ease, box-shadow 0.3s ease;
 }
-.unit-icon-wrap {
-  width: 50px;
-  height: 50px;
-}
-.ups-node__icon {
-  --mdc-icon-size: 28px;
-  color: var(--secondary-text-color, #727272);
+.corner__icon {
+  --mdc-icon-size: 24px;
+  color: var(--secondary-text-color, #aaa);
   transition: color 0.3s ease;
 }
-.ups-node--unit .ups-node__icon {
-  --mdc-icon-size: 32px;
+.corner__meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
-.ups-node--grid.is-active .ups-node__icon { color: var(--primary-color, #03a9f4); }
-.ups-node--load.is-active .ups-node__icon { color: var(--warning-color, #ff9800); }
-.ups-node--grid.is-active { border-color: var(--primary-color, #03a9f4); }
-.ups-node--load.is-active { border-color: var(--warning-color, #ff9800); }
-.ups-node--charge { border-color: var(--success-color, #4caf50); }
-.ups-node--discharge { border-color: var(--warning-color, #ff9800); }
-.ups-node--idle { border-color: var(--divider-color, rgba(127, 127, 127, 0.25)); }
-
-.ups-node__name {
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: var(--primary-text-color, #212121);
-  word-break: break-word;
-}
-.ups-node__power {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--secondary-text-color, #727272);
-  margin-top: 2px;
-  transition: color 0.3s ease;
-}
-.ups-node--grid.is-active .ups-node__power { color: var(--primary-color, #03a9f4); }
-.ups-node--load.is-active .ups-node__power { color: var(--warning-color, #ff9800); }
-
-.unit-name {
-  font-size: 0.95rem;
-  font-weight: 600;
-  margin-bottom: 2px;
-}
-.battery-glyph {
-  width: 90%;
-  max-width: 110px;
-  height: 32px;
-  margin: 4px 0 4px;
-  display: block;
-}
-.battery-body {
-  fill: none;
-  stroke: var(--secondary-text-color, #727272);
-  stroke-width: 1.5;
-  transition: stroke 0.3s ease;
-}
-.battery-cap {
-  fill: var(--secondary-text-color, #727272);
-  stroke: none;
-  transition: fill 0.3s ease;
-}
-.battery-fill {
-  fill: var(--secondary-text-color, #727272);
-  transition: width 0.6s ease, fill 0.3s ease;
-}
-.battery-bolt {
-  fill: var(--ha-card-background, var(--card-background-color, #fff));
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
-.battery-arrow {
-  fill: none;
-  stroke: var(--ha-card-background, var(--card-background-color, #fff));
-  stroke-width: 2.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
-.ups-node--charge .battery-body,
-.ups-node--charge .battery-cap { stroke: var(--success-color, #4caf50); fill: var(--success-color, #4caf50); }
-.ups-node--charge .battery-body { fill: none; }
-.ups-node--charge .battery-fill { fill: var(--success-color, #4caf50); }
-.ups-node--charge .battery-bolt { opacity: 1; animation: bolt-pulse 1.6s ease-in-out infinite; }
-
-.ups-node--discharge .battery-body,
-.ups-node--discharge .battery-cap { stroke: var(--warning-color, #ff9800); fill: var(--warning-color, #ff9800); }
-.ups-node--discharge .battery-body { fill: none; }
-.ups-node--discharge .battery-fill { fill: var(--warning-color, #ff9800); }
-.ups-node--discharge .battery-arrow { opacity: 1; animation: arrow-slide 1.4s ease-in-out infinite; transform-origin: 45px 20px; }
-
-.ups-node--idle .battery-fill { fill: var(--secondary-text-color, #727272); opacity: 0.6; }
-
-@keyframes bolt-pulse {
-  0%, 100% { opacity: 0.55; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.06); }
-}
-@keyframes arrow-slide {
-  0% { opacity: 0.4; transform: translateX(-4px); }
-  50% { opacity: 1; transform: translateX(2px); }
-  100% { opacity: 0.4; transform: translateX(-4px); }
-}
-
-.unit-soc {
+.corner--tr .corner__meta,
+.corner--br .corner__meta { align-items: flex-end; text-align: right; }
+.corner--tl .corner__meta,
+.corner--bl .corner__meta { align-items: flex-start; text-align: left; }
+.corner__power {
   font-size: 1.15rem;
   font-weight: 700;
-  color: var(--primary-text-color, #212121);
-  margin-top: 2px;
+  color: var(--primary-text-color, #fff);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
 }
-.unit-state {
+.corner__name {
   font-size: 0.78rem;
-  text-transform: capitalize;
+  color: var(--secondary-text-color, #999);
   letter-spacing: 0.02em;
-  color: var(--secondary-text-color, #727272);
+  margin-top: 1px;
 }
-.ups-node--charge .unit-state { color: var(--success-color, #4caf50); }
-.ups-node--discharge .unit-state { color: var(--warning-color, #ff9800); }
-.unit-throughput {
-  font-size: 0.9rem;
+.corner.is-absent .corner__power { color: var(--secondary-text-color, #999); }
+
+/* Active highlighting matches the flow color for each direction. */
+.corner--pv.is-active   .corner__icon-wrap { background: var(--success-color, #4caf50); }
+.corner--grid.is-active .corner__icon-wrap { background: var(--info-color, var(--primary-color, #03a9f4)); }
+.corner--ac.is-active   .corner__icon-wrap { background: var(--warning-color, #ff9800); }
+.corner--dc.is-active   .corner__icon-wrap { background: var(--state-binary-sensor-power-on-color, #64b5f6); }
+.corner.is-active .corner__icon { color: #ffffff; }
+
+/* Battery center ---------------------------------------------------- */
+.battery-center {
+  position: relative;
+  width: 200px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.soc-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.soc-arc-bg {
+  fill: none;
+  stroke: var(--divider-color, rgba(127, 127, 127, 0.28));
+  stroke-width: ${ARC_STROKE};
+  stroke-linecap: round;
+}
+.soc-arc-fill {
+  fill: none;
+  stroke: var(--success-color, #4caf50);
+  stroke-width: ${ARC_STROKE};
+  stroke-linecap: round;
+  transition: d 0.6s ease, stroke 0.3s ease;
+}
+.battery-center.soc-medium .soc-arc-fill { stroke: var(--warning-color, #ff9800); }
+.battery-center.soc-low .soc-arc-fill    { stroke: var(--error-color, var(--label-badge-red, #f44336)); }
+.battery-center.soc-unknown .soc-arc-fill { stroke: var(--secondary-text-color, #999); }
+
+.battery-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  text-align: center;
+  width: 70%;
+}
+.battery-icon-wrap {
+  margin-bottom: 4px;
+}
+.battery-icon {
+  --mdc-icon-size: 26px;
+  color: var(--success-color, #4caf50);
+  transition: color 0.3s ease;
+}
+.battery-center.soc-medium .battery-icon { color: var(--warning-color, #ff9800); }
+.battery-center.soc-low .battery-icon    { color: var(--error-color, var(--label-badge-red, #f44336)); }
+.battery-center.soc-unknown .battery-icon { color: var(--secondary-text-color, #999); }
+
+.battery-soc {
+  font-size: 2.6rem;
+  font-weight: 700;
+  color: var(--primary-text-color, #fff);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.battery-soc-unit {
+  font-size: 1rem;
+  margin-left: 2px;
+  color: var(--secondary-text-color, #999);
+  font-weight: 500;
+}
+.battery-state {
+  font-size: 0.8rem;
+  color: var(--secondary-text-color, #999);
+  text-transform: capitalize;
+  margin-top: 4px;
+  letter-spacing: 0.03em;
+}
+.battery-center.state-charge .battery-state    { color: var(--success-color, #4caf50); }
+.battery-center.state-discharge .battery-state { color: var(--warning-color, #ff9800); }
+.battery-throughput {
+  font-size: 0.85rem;
   font-weight: 600;
-  color: var(--secondary-text-color, #727272);
+  color: var(--secondary-text-color, #999);
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
   min-height: 1.1em;
 }
-.ups-node--charge .unit-throughput { color: var(--success-color, #4caf50); }
-.ups-node--discharge .unit-throughput { color: var(--warning-color, #ff9800); }
-.unit-runtime {
+.battery-center.state-charge .battery-throughput    { color: var(--success-color, #4caf50); }
+.battery-center.state-discharge .battery-throughput { color: var(--warning-color, #ff9800); }
+.battery-runtime {
   font-size: 0.78rem;
-  color: var(--secondary-text-color, #727272);
+  color: var(--secondary-text-color, #999);
   margin-top: 2px;
   font-variant-numeric: tabular-nums;
   min-height: 1em;
 }
 
-@media (max-width: 520px) {
+/* Responsive --------------------------------------------------------- */
+@media (max-width: 560px) {
   .ups-card { padding: 12px; }
-  .ups-nodes { grid-template-columns: 1fr 1.3fr 1fr; gap: 4px; min-height: 220px; }
-  .ups-wrap { min-height: 220px; }
-  .ups-node { padding: 8px 4px; border-radius: 12px; }
-  .ups-node__icon-wrap { width: 38px; height: 38px; }
-  .ups-node__icon { --mdc-icon-size: 22px; }
-  .ups-node--unit .ups-node__icon { --mdc-icon-size: 26px; }
-  .battery-glyph { height: 26px; }
-  .unit-soc { font-size: 1rem; }
-  .ups-node__name { font-size: 0.78rem; }
-  .ups-node__power { font-size: 0.85rem; }
+  .ups-wrap { min-height: 280px; }
+  .ups-grid { min-height: 280px; gap: 4px; grid-template-columns: 1fr 1.4fr 1fr; }
+  .corner__icon-wrap { width: 36px; height: 36px; }
+  .corner__icon { --mdc-icon-size: 20px; }
+  .corner__power { font-size: 1rem; }
+  .corner__name { font-size: 0.72rem; }
+  .battery-center { width: 160px; height: 160px; }
+  .battery-icon { --mdc-icon-size: 22px; }
+  .battery-soc { font-size: 2.1rem; }
+  .battery-soc-unit { font-size: 0.85rem; }
 }
 `;
 
