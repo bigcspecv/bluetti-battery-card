@@ -21,6 +21,9 @@ state-of-charge gauge. Flow lines animate when their input/output is active.
   real HA WebSocket template API)
 - Animated power-flow lines with speed scaled to wattage
 - Semicircular SoC gauge whose color follows battery-level conventions
+- "Updated Xs ago" staleness indicator — flags the card when an integration
+  silently drops and entities keep their last value instead of going
+  unavailable
 - Optional DC and PV corners — show "—" when not configured
 - Backward-compatible: v0.1 configs using `load:` are accepted and rendered as
   the AC corner

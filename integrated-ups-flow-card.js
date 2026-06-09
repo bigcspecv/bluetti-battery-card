@@ -17,9 +17,16 @@
  * L-shaped with rounded corners and animated when their flow is active.
  *
  * Plain Web Component, no build step, no external imports.
+ *
+ * v0.5.0 adds a "last updated / Xs ago" staleness indicator. Some
+ * integrations (BLUETTI's cloud poller in particular) silently drop their
+ * connection and leave entities holding their last value instead of going
+ * `unavailable`. The indicator tracks the newest report timestamp across the
+ * configured entities and flags the card when that freshness exceeds a
+ * configurable threshold.
  */
 
-const CARD_VERSION = '0.4.3';
+const CARD_VERSION = '0.5.0';
 const CARD_TAG = 'integrated-ups-flow-card';
 const EDITOR_TAG = `${CARD_TAG}-editor`;
 
@@ -44,7 +51,15 @@ if (!window.customCards.find((c) => c && c.type === CARD_TAG)) {
 const DEFAULTS = {
   idle_threshold: 5,
   max_power: 2600,
+  // Seconds since the newest entity report before the card is flagged stale.
+  // BLUETTI's cloud poll cadence is well under this, so a steady connection
+  // never trips it; a dropped connection climbs past it within ~2 min.
+  stale_threshold: 120,
 };
+
+// How often (ms) the relative-age line is refreshed so "Xs ago" keeps ticking
+// even when no new state arrives (a dropped integration stops pushing hass).
+const FRESHNESS_TICK_MS = 1000;
 
 // Flow animation: longer dur = slower; low power -> slow, high -> fast.
 const ANIM_SLOW_S = 4.0;
@@ -91,6 +106,30 @@ function fmtRuntime(min) {
   const m = total % 60;
   if (h <= 0) return `${m}m`;
   return `${h}h ${m}m`;
+}
+
+// Newest "this entity reported" time, in ms, from a frontend state object.
+// Prefer last_reported (bumped on every report even when the value is
+// unchanged, so a steady-but-alive poll still counts as fresh), then fall
+// back to last_updated and last_changed for older HA cores.
+function entityFreshnessMs(stateObj) {
+  if (!stateObj) return null;
+  const ts = stateObj.last_reported || stateObj.last_updated || stateObj.last_changed;
+  if (!ts) return null;
+  const ms = Date.parse(ts);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Compact relative age: "12s ago", "4m ago", "1h 3m ago".
+function fmtAgo(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return '';
+  const s = Math.floor(sec);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM > 0 ? `${h}h ${remM}m ago` : `${h}h ago`;
 }
 
 function polarToCartesian(cx, cy, r, angleDeg) {
@@ -146,6 +185,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
         show_state: true,
         show_throughput: true,
         show_runtime: true,
+        show_last_updated: true,
         runtime_entity: '',
         charge_time_entity: '',
       },
@@ -153,6 +193,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
         idle_threshold: 5,
         invert_battery_sign: false,
         max_power: 2600,
+        stale_threshold: 120,
       },
     };
   }
@@ -168,6 +209,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
     this._renderQueued = false;
     this._resizeObserver = null;
     this._resizeTimer = null;
+    this._freshnessTimer = null;
   }
 
   // ----- Lovelace lifecycle -----
@@ -222,6 +264,9 @@ class IntegratedUpsFlowCard extends HTMLElement {
         show_state: display.show_state !== false,
         show_throughput: display.show_throughput !== false,
         show_runtime: display.show_runtime !== false,
+        // Last-updated / staleness line. On by default — it's the whole point
+        // of the card for integrations that freeze instead of going offline.
+        show_last_updated: display.show_last_updated !== false,
         // Optional overrides — when set, the rendered line uses the string
         // (templates allowed) instead of the computed default.
         state_template: display.state_template || null,
@@ -248,6 +293,10 @@ class IntegratedUpsFlowCard extends HTMLElement {
           Number.isFinite(opts.max_power) && opts.max_power > 0
             ? opts.max_power
             : DEFAULTS.max_power,
+        stale_threshold:
+          Number.isFinite(opts.stale_threshold) && opts.stale_threshold > 0
+            ? opts.stale_threshold
+            : DEFAULTS.stale_threshold,
       },
     };
 
@@ -281,12 +330,14 @@ class IntegratedUpsFlowCard extends HTMLElement {
     }
     if (this._initialized) {
       this._setupResizeObserver();
+      this._startFreshnessTimer();
       this._scheduleRender(true);
     }
   }
 
   disconnectedCallback() {
     this._teardownResizeObserver();
+    this._stopFreshnessTimer();
     this._resetTemplateSubs();
   }
 
@@ -549,11 +600,25 @@ class IntegratedUpsFlowCard extends HTMLElement {
     const runtime = document.createElement('div');
     runtime.className = 'battery-runtime';
 
+    // Freshness / staleness line: a small clock icon + relative age. Turns
+    // into an alert icon and warning color once the newest reading is older
+    // than options.stale_threshold.
+    const freshness = document.createElement('div');
+    freshness.className = 'battery-freshness';
+    const freshnessIcon = document.createElement('ha-icon');
+    freshnessIcon.className = 'battery-freshness__icon';
+    freshnessIcon.setAttribute('icon', 'mdi:clock-outline');
+    const freshnessText = document.createElement('span');
+    freshnessText.className = 'battery-freshness__text';
+    freshness.appendChild(freshnessIcon);
+    freshness.appendChild(freshnessText);
+
     content.appendChild(iconWrap);
     content.appendChild(soc);
     content.appendChild(state);
     content.appendChild(throughput);
     content.appendChild(runtime);
+    content.appendChild(freshness);
 
     root.appendChild(content);
 
@@ -568,6 +633,9 @@ class IntegratedUpsFlowCard extends HTMLElement {
       stateEl: state,
       throughputEl: throughput,
       runtimeEl: runtime,
+      freshnessWrap: freshness,
+      freshnessIcon,
+      freshnessEl: freshnessText,
     };
   }
 
@@ -711,6 +779,9 @@ class IntegratedUpsFlowCard extends HTMLElement {
 
     // Recompute path geometry — node positions can shift on resize.
     this._updatePaths();
+
+    // Refresh the staleness line on every hass push as well as on the timer.
+    this._updateFreshness();
   }
 
   _batteryIconForState(soc, battP, idle) {
@@ -770,6 +841,89 @@ class IntegratedUpsFlowCard extends HTMLElement {
     el.style.display = '';
     const text = override !== null && override !== undefined ? String(override) : fallback;
     el.textContent = text || '';
+  }
+
+  // ----- Freshness / staleness -----
+
+  // Plain entity IDs the card is displaying. Templates are skipped — they
+  // don't map to a single state object with a report timestamp.
+  _freshnessEntityIds() {
+    const c = this._config;
+    if (!c) return [];
+    return [
+      c.pv.entity,
+      c.grid.entity,
+      c.dc.entity,
+      c.ac.entity,
+      c.unit.soc_entity,
+      c.unit.power_entity,
+      c.display.runtime_entity,
+      c.display.charge_time_entity,
+    ].filter((f) => f && !isTemplate(f));
+  }
+
+  // Newest report time (ms) across the displayed entities. These all come
+  // from the same device, so a live integration keeps at least one of them
+  // fresh every poll; a dropped one freezes them all together. Entities in
+  // an unavailable/unknown state are ignored so flipping offline can't be
+  // mistaken for a fresh report.
+  _computeFreshnessMs() {
+    if (!this._hass || !this._hass.states) return null;
+    let newest = null;
+    for (const id of this._freshnessEntityIds()) {
+      const s = this._hass.states[id];
+      if (!s || s.state === 'unavailable' || s.state === 'unknown') continue;
+      const ms = entityFreshnessMs(s);
+      if (ms !== null && (newest === null || ms > newest)) newest = ms;
+    }
+    return newest;
+  }
+
+  _updateFreshness() {
+    if (!this._battery || !this._config) return;
+    const wrap = this._battery.freshnessWrap;
+    const ids = this._freshnessEntityIds();
+
+    // Nothing to measure (hidden, or every field is a template) -> no line.
+    if (!this._config.display.show_last_updated || ids.length === 0) {
+      wrap.style.display = 'none';
+      wrap.classList.remove('is-stale');
+      if (this._card) this._card.classList.remove('is-stale');
+      return;
+    }
+    wrap.style.display = '';
+
+    const newest = this._computeFreshnessMs();
+    if (newest === null) {
+      // No usable reading at all — treat as the worst case.
+      this._battery.freshnessIcon.setAttribute('icon', 'mdi:clock-alert-outline');
+      this._battery.freshnessEl.textContent = 'no data';
+      wrap.classList.add('is-stale');
+      if (this._card) this._card.classList.add('is-stale');
+      return;
+    }
+
+    const ageSec = (Date.now() - newest) / 1000;
+    const stale = ageSec >= this._config.options.stale_threshold;
+    this._battery.freshnessEl.textContent = fmtAgo(ageSec);
+    this._battery.freshnessIcon.setAttribute(
+      'icon',
+      stale ? 'mdi:alert-circle-outline' : 'mdi:clock-outline'
+    );
+    wrap.classList.toggle('is-stale', stale);
+    if (this._card) this._card.classList.toggle('is-stale', stale);
+  }
+
+  _startFreshnessTimer() {
+    if (this._freshnessTimer) return;
+    this._freshnessTimer = setInterval(() => this._updateFreshness(), FRESHNESS_TICK_MS);
+  }
+
+  _stopFreshnessTimer() {
+    if (this._freshnessTimer) {
+      clearInterval(this._freshnessTimer);
+      this._freshnessTimer = null;
+    }
   }
 
   _updatePaths() {
@@ -1119,6 +1273,39 @@ const STYLES = `
   font-variant-numeric: tabular-nums;
   min-height: 1em;
 }
+.battery-freshness {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.72rem;
+  color: var(--secondary-text-color, #999);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+  min-height: 1em;
+  transition: color 0.3s ease;
+}
+.battery-freshness__icon {
+  --mdc-icon-size: 13px;
+  color: inherit;
+}
+.battery-freshness.is-stale {
+  color: var(--error-color, var(--label-badge-red, #f44336));
+  font-weight: 600;
+}
+
+/* Stale state: ring the card and dim the (frozen) readings so the values
+   are obviously not to be trusted at a glance from the dashboard. */
+.ups-card.is-stale {
+  box-shadow: inset 0 0 0 2px var(--error-color, var(--label-badge-red, #f44336));
+}
+.ups-card.is-stale .corner__power,
+.ups-card.is-stale .battery-soc,
+.ups-card.is-stale .battery-state,
+.ups-card.is-stale .battery-throughput,
+.ups-card.is-stale .battery-runtime {
+  opacity: 0.5;
+  transition: opacity 0.3s ease;
+}
 
 /* Responsive --------------------------------------------------------- */
 @media (max-width: 560px) {
@@ -1171,11 +1358,13 @@ const EDITOR_LABELS = {
   show_state: 'Show charging / discharging / idle label',
   show_throughput: 'Show battery throughput (± W)',
   show_runtime: 'Show estimated runtime',
+  show_last_updated: 'Show last-updated / staleness indicator',
   state_template: 'Override the state label',
   throughput_template: 'Override the throughput line',
   runtime_template: 'Override the runtime line',
   idle_threshold: 'Idle threshold (W)',
   max_power: 'Max power for animation scaling (W)',
+  stale_threshold: 'Stale threshold (seconds)',
   invert_battery_sign: 'Invert sign of battery power sensor',
 };
 
@@ -1200,6 +1389,10 @@ const EDITOR_HELPERS = {
     'Power values below this are treated as no flow (line stays gray). Default 5 W.',
   max_power:
     'Wattage that maps to the fastest dot animation. Higher wattages clamp to this; lower wattages slow proportionally. Default 2600 W.',
+  show_last_updated:
+    'Shows how long ago the displayed entities last reported. Useful when an integration silently drops and entities keep their last value instead of going unavailable.',
+  stale_threshold:
+    'When the newest reading is older than this many seconds, the indicator turns red and the card readings dim. Default 120 s.',
   invert_battery_sign:
     "Only relevant when 'Battery power sensor' above is set. Toggle on if that sensor reports discharge as positive (some integrations).",
 };
@@ -1227,6 +1420,7 @@ function buildEditorSchema(config) {
     displaySchema.push({ name: 'charge_time_entity', selector: ENTITY_SELECTOR });
     displaySchema.push({ name: 'runtime_template', selector: TEMPLATE_SELECTOR });
   }
+  displaySchema.push({ name: 'show_last_updated', selector: { boolean: {} } });
 
   const optionsSchema = [
     {
@@ -1239,6 +1433,12 @@ function buildEditorSchema(config) {
       name: 'max_power',
       selector: {
         number: { min: 100, max: 20000, step: 100, mode: 'box', unit_of_measurement: 'W' },
+      },
+    },
+    {
+      name: 'stale_threshold',
+      selector: {
+        number: { min: 10, max: 3600, step: 5, mode: 'box', unit_of_measurement: 's' },
       },
     },
   ];

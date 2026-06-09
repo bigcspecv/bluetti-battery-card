@@ -9,8 +9,9 @@
      * Simulates the Home Assistant frontend just enough to render the card
      * without a real HA instance:
      *   - Stub <ha-card> / <ha-icon> custom elements.
-     *   - Mock hass with the elite_200_v2_01 sensors at four scenarios:
-     *     charging-from-grid, discharging-to-ac, solar-charging, and idle.
+     *   - Mock hass with the elite_200_v2_01 sensors at five scenarios:
+     *     charging-from-grid, discharging-to-ac, solar-charging, idle, and a
+     *     stale case whose entities last reported 4 min ago.
      *   - Mounts each scenario in its own container.
      */
     :root {
@@ -82,6 +83,10 @@
         <h2>Idle (everything ~0, soc 100)</h2>
         <div id="card-idle"></div>
       </div>
+      <div class="scenario">
+        <h2>Stale (frozen 4m ago — red ring, dimmed readings)</h2>
+        <div id="card-stale"></div>
+      </div>
     </div>
   </div>
 
@@ -134,10 +139,16 @@
     customElements.define('ha-icon', HaIconStub);
 
     /* Mock hass */
-    function makeHass({ pv, grid, dc, ac, soc, runtime }) {
+    function makeHass({ pv, grid, dc, ac, soc, runtime, ageSec = 0 }) {
+      // Stamp every entity as last reporting `ageSec` seconds ago so the
+      // card's freshness indicator has something to measure. A live BLUETTI
+      // poll keeps this small; the stale scenario pushes it past the default
+      // 120 s threshold.
+      const ts = new Date(Date.now() - ageSec * 1000).toISOString();
       const mk = (id, state, unit) => ({
         entity_id: id, state: String(state),
-        attributes: { unit_of_measurement: unit, friendly_name: id }
+        attributes: { unit_of_measurement: unit, friendly_name: id },
+        last_reported: ts, last_updated: ts, last_changed: ts,
       });
       return {
         states: {
@@ -181,6 +192,10 @@
         { id: 'card-solar',     state: { pv: 1100, grid: 0,    dc: 0,  ac: 250, soc: 65,  runtime: 0 } },
         // Idle — small load just outside threshold cancels nothing.
         { id: 'card-idle',      state: { pv: 0,    grid: 0,    dc: 0,  ac: 0,   soc: 100, runtime: 0 } },
+        // Stale — discharging values, but every entity last reported 4 min
+        // ago (past the 120 s threshold): indicator goes red, readings dim,
+        // card gets a red ring.
+        { id: 'card-stale',     state: { pv: 0,    grid: 0,    dc: 0,  ac: 347, soc: 79,  runtime: 300, ageSec: 240 } },
       ];
       for (const s of scenarios) {
         const host = document.getElementById(s.id);

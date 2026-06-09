@@ -67,7 +67,7 @@ collapsible sections for each corner, the unit, the center display, and the
 options. YAML mode still works for everything the editor exposes, plus
 anything Jinja that the editor's selectors don't render.
 
-### Schema (v0.4)
+### Schema (v0.5)
 
 ```yaml
 type: custom:integrated-ups-flow-card
@@ -103,6 +103,7 @@ display:
   show_state: true           # charging / discharging / idle label
   show_throughput: true      # ± W line below the state label
   show_runtime: true         # runtime / charge-time line
+  show_last_updated: true    # "Xs ago" freshness / staleness line (added in v0.5)
   state_template: ~          # optional plain string or Jinja override
   throughput_template: ~     # optional plain string or Jinja override
   runtime_entity: sensor.elite_200_v2_01_battery_time_in_minutes            # optional, used while discharging
@@ -113,6 +114,7 @@ options:
   idle_threshold: 5          # W deadband around zero (default 5)
   invert_battery_sign: false # flip if power_entity uses discharge-positive
   max_power: 2600            # W — used to scale flow animation speed
+  stale_threshold: 120       # s — readings older than this flag the card stale (added in v0.5)
 ```
 
 ### Field reference
@@ -133,6 +135,7 @@ options:
 | `display.show_state` | no | Show the charging / discharging / idle label inside the arc. Default `true`. |
 | `display.show_throughput` | no | Show the ± W throughput line inside the arc. Default `true`. |
 | `display.show_runtime` | no | Show the runtime / charge-time line inside the arc. Default `true`. |
+| `display.show_last_updated` | no | Show the "Xs ago" freshness line and stale flagging (see [Staleness indicator](#staleness-indicator)). Default `true`. |
 | `display.runtime_entity` | no | Time remaining while *discharging*, in minutes. Many integrations (BLUETTI included) report 0 while charging. Shown as `Xh Ym left`. |
 | `display.charge_time_entity` | no | Time to full while *charging*, in minutes (e.g. BLUETTI's `full_charge_time_in_minutes`). When set and charging, the runtime line shows `Xh Ym to full`. |
 | `display.state_template` | no | Override the state label. Accepts either a plain string or a Jinja template. |
@@ -141,6 +144,7 @@ options:
 | `options.idle_threshold` | no | Watts deadband used for active/idle decisions. Default `5`. |
 | `options.invert_battery_sign` | no | Set `true` if your `power_entity` reports discharge as positive. |
 | `options.max_power` | no | Watts used as the upper bound for animation-speed scaling. Default `2600`. |
+| `options.stale_threshold` | no | Seconds since the newest reading before the card is flagged stale (indicator turns red, readings dim, card gets a red ring). Default `120`. |
 
 ### Templates
 
@@ -173,6 +177,34 @@ clickable and opens Home Assistant's standard more-info dialog for the
 configured entity — `pv.entity`, `grid.entity`, `dc.entity`, `ac.entity`, and
 `unit.soc_entity` respectively. Corners whose entity is configured as a Jinja
 template are non-clickable (a template doesn't map to a single entity).
+
+## Staleness indicator
+
+Added in **v0.5.0**. Some integrations — BLUETTI's cloud poller in particular —
+silently drop their connection and leave their entities holding the *last*
+value instead of going `unavailable`. The card then shows numbers that look
+live but aren't.
+
+To catch this, the card shows a small "updated **Xs ago**" line under the
+center column. It measures the **newest report time across every displayed
+entity** (using each entity's `last_reported`, falling back to `last_updated`
+then `last_changed`). Because all the corners and the battery come from the
+same device, a healthy poll keeps at least one of them fresh; a dropped
+connection freezes them all together, so the age climbs.
+
+Once that age passes `options.stale_threshold` (default **120 s**):
+
+- the clock icon becomes a red alert icon and the line turns red,
+- the readings (corner watts, SoC, throughput, runtime) dim, and
+- the card gets a red inset ring,
+
+so a frozen card is obvious at a glance from the dashboard. The line ticks once
+a second on its own, so the age keeps counting up even while the integration is
+pushing no updates. Entities currently in `unavailable` / `unknown` are ignored
+(so flipping offline can't masquerade as a fresh report); if nothing usable is
+present the line reads "no data". Hide the whole thing with
+`display.show_last_updated: false`. Template entity fields are skipped — they
+don't map to a single state object with a report timestamp.
 
 ## Flow logic
 
