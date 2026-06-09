@@ -22,11 +22,15 @@
  * integrations (BLUETTI's cloud poller in particular) silently drop their
  * connection and leave entities holding their last value instead of going
  * `unavailable`. The indicator tracks the newest report timestamp across the
- * configured entities and flags the card when that freshness exceeds a
- * configurable threshold.
+ * configured entities.
+ *
+ * v0.5.1 splits the two failure modes apart: the card's red border is driven
+ * solely by the battery-level entity going `unavailable` (the clean-drop
+ * signal), while `stale_threshold` (default 300 s) only controls when the
+ * "Xs ago" text turns red (the frozen-value signal).
  */
 
-const CARD_VERSION = '0.5.0';
+const CARD_VERSION = '0.5.1';
 const CARD_TAG = 'integrated-ups-flow-card';
 const EDITOR_TAG = `${CARD_TAG}-editor`;
 
@@ -51,10 +55,11 @@ if (!window.customCards.find((c) => c && c.type === CARD_TAG)) {
 const DEFAULTS = {
   idle_threshold: 5,
   max_power: 2600,
-  // Seconds since the newest entity report before the card is flagged stale.
-  // BLUETTI's cloud poll cadence is well under this, so a steady connection
-  // never trips it; a dropped connection climbs past it within ~2 min.
-  stale_threshold: 120,
+  // Seconds since the newest entity report before the "Xs ago" text turns
+  // red. This controls the text color only — the card's red border is driven
+  // separately, by the battery-level entity going `unavailable`. BLUETTI's
+  // poll cadence sits well under this, so a healthy connection never trips it.
+  stale_threshold: 300,
 };
 
 // How often (ms) the relative-age line is refreshed so "Xs ago" keeps ticking
@@ -193,7 +198,7 @@ class IntegratedUpsFlowCard extends HTMLElement {
         idle_threshold: 5,
         invert_battery_sign: false,
         max_power: 2600,
-        stale_threshold: 120,
+        stale_threshold: 300,
       },
     };
   }
@@ -881,6 +886,21 @@ class IntegratedUpsFlowCard extends HTMLElement {
 
   _updateFreshness() {
     if (!this._battery || !this._config) return;
+
+    // --- Card red border: driven ONLY by the battery-level entity going
+    // `unavailable`. This is the clean-drop signal (the integration dropped
+    // and HA correctly marked the entity offline). The frozen-value case,
+    // where the entity keeps its last reading, is caught by the staleness
+    // text below instead.
+    const socId = this._config.unit.soc_entity;
+    let socUnavailable = false;
+    if (socId && !isTemplate(socId) && this._hass && this._hass.states) {
+      const s = this._hass.states[socId];
+      socUnavailable = !!s && s.state === 'unavailable';
+    }
+    if (this._card) this._card.classList.toggle('is-disconnected', socUnavailable);
+
+    // --- "Updated Xs ago" text + its threshold-driven coloring.
     const wrap = this._battery.freshnessWrap;
     const ids = this._freshnessEntityIds();
 
@@ -888,18 +908,16 @@ class IntegratedUpsFlowCard extends HTMLElement {
     if (!this._config.display.show_last_updated || ids.length === 0) {
       wrap.style.display = 'none';
       wrap.classList.remove('is-stale');
-      if (this._card) this._card.classList.remove('is-stale');
       return;
     }
     wrap.style.display = '';
 
     const newest = this._computeFreshnessMs();
     if (newest === null) {
-      // No usable reading at all — treat as the worst case.
+      // No usable reading at all — show the worst-case text treatment.
       this._battery.freshnessIcon.setAttribute('icon', 'mdi:clock-alert-outline');
       this._battery.freshnessEl.textContent = 'no data';
       wrap.classList.add('is-stale');
-      if (this._card) this._card.classList.add('is-stale');
       return;
     }
 
@@ -911,7 +929,6 @@ class IntegratedUpsFlowCard extends HTMLElement {
       stale ? 'mdi:alert-circle-outline' : 'mdi:clock-outline'
     );
     wrap.classList.toggle('is-stale', stale);
-    if (this._card) this._card.classList.toggle('is-stale', stale);
   }
 
   _startFreshnessTimer() {
@@ -1293,16 +1310,17 @@ const STYLES = `
   font-weight: 600;
 }
 
-/* Stale state: ring the card and dim the (frozen) readings so the values
-   are obviously not to be trusted at a glance from the dashboard. */
-.ups-card.is-stale {
+/* Disconnected: the battery-level entity is unavailable. Ring the card and
+   dim the (now-meaningless) readings so a dropped unit is obvious at a glance
+   from the dashboard. This is separate from the "Xs ago" text staleness. */
+.ups-card.is-disconnected {
   box-shadow: inset 0 0 0 2px var(--error-color, var(--label-badge-red, #f44336));
 }
-.ups-card.is-stale .corner__power,
-.ups-card.is-stale .battery-soc,
-.ups-card.is-stale .battery-state,
-.ups-card.is-stale .battery-throughput,
-.ups-card.is-stale .battery-runtime {
+.ups-card.is-disconnected .corner__power,
+.ups-card.is-disconnected .battery-soc,
+.ups-card.is-disconnected .battery-state,
+.ups-card.is-disconnected .battery-throughput,
+.ups-card.is-disconnected .battery-runtime {
   opacity: 0.5;
   transition: opacity 0.3s ease;
 }
@@ -1392,7 +1410,7 @@ const EDITOR_HELPERS = {
   show_last_updated:
     'Shows how long ago the displayed entities last reported. Useful when an integration silently drops and entities keep their last value instead of going unavailable.',
   stale_threshold:
-    'When the newest reading is older than this many seconds, the indicator turns red and the card readings dim. Default 120 s.',
+    'When the newest reading is older than this many seconds, the "Xs ago" text turns red. Text color only — the card\'s red border is separate, and appears when the battery-level entity goes unavailable. Default 300 s.',
   invert_battery_sign:
     "Only relevant when 'Battery power sensor' above is set. Toggle on if that sensor reports discharge as positive (some integrations).",
 };

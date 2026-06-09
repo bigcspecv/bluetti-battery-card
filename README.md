@@ -114,7 +114,7 @@ options:
   idle_threshold: 5          # W deadband around zero (default 5)
   invert_battery_sign: false # flip if power_entity uses discharge-positive
   max_power: 2600            # W — used to scale flow animation speed
-  stale_threshold: 120       # s — readings older than this flag the card stale (added in v0.5)
+  stale_threshold: 300       # s — the "Xs ago" text turns red past this (added in v0.5)
 ```
 
 ### Field reference
@@ -135,7 +135,7 @@ options:
 | `display.show_state` | no | Show the charging / discharging / idle label inside the arc. Default `true`. |
 | `display.show_throughput` | no | Show the ± W throughput line inside the arc. Default `true`. |
 | `display.show_runtime` | no | Show the runtime / charge-time line inside the arc. Default `true`. |
-| `display.show_last_updated` | no | Show the "Xs ago" freshness line and stale flagging (see [Staleness indicator](#staleness-indicator)). Default `true`. |
+| `display.show_last_updated` | no | Show the "Xs ago" freshness line (see [Staleness indicator](#staleness-indicator)). Default `true`. |
 | `display.runtime_entity` | no | Time remaining while *discharging*, in minutes. Many integrations (BLUETTI included) report 0 while charging. Shown as `Xh Ym left`. |
 | `display.charge_time_entity` | no | Time to full while *charging*, in minutes (e.g. BLUETTI's `full_charge_time_in_minutes`). When set and charging, the runtime line shows `Xh Ym to full`. |
 | `display.state_template` | no | Override the state label. Accepts either a plain string or a Jinja template. |
@@ -144,7 +144,7 @@ options:
 | `options.idle_threshold` | no | Watts deadband used for active/idle decisions. Default `5`. |
 | `options.invert_battery_sign` | no | Set `true` if your `power_entity` reports discharge as positive. |
 | `options.max_power` | no | Watts used as the upper bound for animation-speed scaling. Default `2600`. |
-| `options.stale_threshold` | no | Seconds since the newest reading before the card is flagged stale (indicator turns red, readings dim, card gets a red ring). Default `120`. |
+| `options.stale_threshold` | no | Seconds since the newest reading before the "Xs ago" text turns red. Text color only — the card's red border is driven separately, by the battery-level entity going `unavailable`. Default `300`. |
 
 ### Templates
 
@@ -180,31 +180,36 @@ template are non-clickable (a template doesn't map to a single entity).
 
 ## Staleness indicator
 
-Added in **v0.5.0**. Some integrations — BLUETTI's cloud poller in particular —
-silently drop their connection and leave their entities holding the *last*
-value instead of going `unavailable`. The card then shows numbers that look
-live but aren't.
+Added in **v0.5.0**; refined in **v0.5.1**. Some integrations — BLUETTI's cloud
+poller in particular — drop their connection in one of two ways:
 
-To catch this, the card shows a small "updated **Xs ago**" line under the
-center column. It measures the **newest report time across every displayed
-entity** (using each entity's `last_reported`, falling back to `last_updated`
-then `last_changed`). Because all the corners and the battery come from the
-same device, a healthy poll keeps at least one of them fresh; a dropped
-connection freezes them all together, so the age climbs.
+1. **Clean drop:** Home Assistant marks the entities `unavailable`.
+2. **Frozen:** the entities keep their *last* value, so the card shows numbers
+   that look live but aren't.
 
-Once that age passes `options.stale_threshold` (default **120 s**):
+The card flags each case differently.
 
-- the clock icon becomes a red alert icon and the line turns red,
-- the readings (corner watts, SoC, throughput, runtime) dim, and
-- the card gets a red inset ring,
+**Frozen values → red "Xs ago" text.** The card shows a small "updated
+**Xs ago**" line under the center column, measuring the **newest report time
+across every displayed entity** (each entity's `last_reported`, falling back to
+`last_updated` then `last_changed`). Because all the corners and the battery
+come from the same device, a healthy poll keeps at least one of them fresh; a
+frozen connection lets the age climb. Once it passes `options.stale_threshold`
+(default **300 s**), the clock becomes a red alert icon and the line turns red.
+The line ticks once a second on its own, so the age keeps counting even while
+the integration pushes no updates. This affects the text only — no ring, no
+dimming. Entities currently in `unavailable` / `unknown` are skipped (so
+flipping offline can't masquerade as a fresh report); if nothing usable is
+present the line reads "no data". Hide it with `display.show_last_updated:
+false`. Template entity fields are skipped — they don't map to a single state
+object with a report timestamp.
 
-so a frozen card is obvious at a glance from the dashboard. The line ticks once
-a second on its own, so the age keeps counting up even while the integration is
-pushing no updates. Entities currently in `unavailable` / `unknown` are ignored
-(so flipping offline can't masquerade as a fresh report); if nothing usable is
-present the line reads "no data". Hide the whole thing with
-`display.show_last_updated: false`. Template entity fields are skipped — they
-don't map to a single state object with a report timestamp.
+**Clean drop → red card border.** When the **battery-level entity
+(`unit.soc_entity`) reports `unavailable`**, the whole card gets a red inset
+ring and its readings dim, so a dropped unit is unmistakable at a glance from
+the dashboard. This is independent of `stale_threshold` and of
+`show_last_updated` — it keys solely on the battery entity's state. (Only
+`unavailable` triggers it, not `unknown`.)
 
 ## Flow logic
 

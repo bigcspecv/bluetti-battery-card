@@ -9,9 +9,10 @@
      * Simulates the Home Assistant frontend just enough to render the card
      * without a real HA instance:
      *   - Stub <ha-card> / <ha-icon> custom elements.
-     *   - Mock hass with the elite_200_v2_01 sensors at five scenarios:
-     *     charging-from-grid, discharging-to-ac, solar-charging, idle, and a
-     *     stale case whose entities last reported 4 min ago.
+     *   - Mock hass with the elite_200_v2_01 sensors at six scenarios:
+     *     charging-from-grid, discharging-to-ac, solar-charging, idle, a stale
+     *     case whose entities last reported 6 min ago (red "ago" text only),
+     *     and a battery-unavailable case (red ring + dimmed readings).
      *   - Mounts each scenario in its own container.
      */
     :root {
@@ -61,7 +62,7 @@
   <div class="page">
     <h1>integrated-ups-flow-card — local test harness</h1>
     <p class="sub">
-      Renders four scenarios with mock hass data — no Home Assistant required.
+      Renders six scenarios with mock hass data — no Home Assistant required.
       You should see four corners (PV top-left, Grid top-right, DC bottom-left,
       AC bottom-right) with the SoC arc in the middle. Active flows animate
       with a colored dash traveling along the line.
@@ -84,8 +85,12 @@
         <div id="card-idle"></div>
       </div>
       <div class="scenario">
-        <h2>Stale (frozen 4m ago — red ring, dimmed readings)</h2>
+        <h2>Stale text (frozen 6m ago — red "ago" text only, no ring)</h2>
         <div id="card-stale"></div>
+      </div>
+      <div class="scenario">
+        <h2>Battery unavailable (red ring + dimmed readings)</h2>
+        <div id="card-unavail"></div>
       </div>
     </div>
   </div>
@@ -192,10 +197,14 @@
         { id: 'card-solar',     state: { pv: 1100, grid: 0,    dc: 0,  ac: 250, soc: 65,  runtime: 0 } },
         // Idle — small load just outside threshold cancels nothing.
         { id: 'card-idle',      state: { pv: 0,    grid: 0,    dc: 0,  ac: 0,   soc: 100, runtime: 0 } },
-        // Stale — discharging values, but every entity last reported 4 min
-        // ago (past the 120 s threshold): indicator goes red, readings dim,
-        // card gets a red ring.
-        { id: 'card-stale',     state: { pv: 0,    grid: 0,    dc: 0,  ac: 347, soc: 79,  runtime: 300, ageSec: 240 } },
+        // Stale text — discharging values, but every entity last reported 6
+        // min ago (past the 300 s threshold): the "Xs ago" text goes red.
+        // No ring and no dimming — the battery entity still has a value.
+        { id: 'card-stale',     state: { pv: 0,    grid: 0,    dc: 0,  ac: 347, soc: 79,  runtime: 300, ageSec: 360 } },
+        // Battery unavailable — the soc entity reports the unavailable state:
+        // red ring + dimmed readings. Other entities are fresh, so the
+        // "Xs ago" text stays normal.
+        { id: 'card-unavail',   state: { pv: 0,    grid: 0,    dc: 0,  ac: 347, soc: 'unavailable', runtime: 300, ageSec: 0 } },
       ];
       for (const s of scenarios) {
         const host = document.getElementById(s.id);
